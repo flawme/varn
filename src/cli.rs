@@ -315,10 +315,10 @@ fn absolutize(path: &PathBuf) -> Result<PathBuf> {
     Ok(cwd.join(path))
 }
 
-/// Format a UNIX timestamp as `YYYY-MM-DD HH:MM` (local time).
+/// Format a UNIX timestamp as `YYYY-MM-DD HH:MM` (UTC).
 fn format_timestamp(ts: i64) -> String {
     // Simple formatting without external dependencies.
-    // Uses the system's local timezone via `chrono`-free arithmetic.
+    // Computes UTC date/time without a timezone library.
     let secs = ts as u64;
     let days_since_epoch = secs / 86400;
     let time_of_day = secs % 86400;

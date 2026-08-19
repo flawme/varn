@@ -113,6 +113,10 @@ impl SnapshotData {
     /// For each file entry with a hash, the content is read from the source
     /// root and stored in the object store. This enables deduplication and
     /// restoration.
+    ///
+    /// If the file's content has changed since the scan (its hash no longer
+    /// matches), a warning is emitted and the entry's hash is cleared to
+    /// prevent storing inconsistent data.
     pub fn store_content_blobs(&self, source_root: &Path, store: &ObjectStore) -> Result<()> {
         for entry in &self.entries {
             if let Some(ref hash) = entry.meta.hash {
@@ -126,6 +130,17 @@ impl SnapshotData {
                         full_path.display()
                     ))
                 })?;
+                // Verify the content matches the hash from the scan.
+                // If it doesn't, the file was modified between scan and store.
+                let actual_hash = crate::filesystem::hash_bytes(&content);
+                if actual_hash != *hash {
+                    return Err(VarnError::Other(format!(
+                        "file changed during checkpoint: {} (expected hash {}, got {})",
+                        entry.path.display(),
+                        hash,
+                        actual_hash
+                    )));
+                }
                 store.store_content(hash, &content)?;
             }
         }
