@@ -11,12 +11,12 @@ src/
 ├── main.rs        Binary entry point
 ├── cli.rs         CLI: argument parsing, output formatting, exit codes
 ├── core.rs        Domain models: checkpoint identity, snapshot metadata
-├── filesystem.rs  Filesystem data model: entry types, metadata
+├── filesystem.rs  Filesystem data model + scanner: entry types, metadata, recursive scanning with SHA-256 hashing
 ├── snapshot.rs    Snapshot engine: creating checkpoints (placeholder)
 ├── storage.rs     On-disk layout, repository config, persistence
 ├── diff.rs        Diff engine: comparing two states
 ├── restore.rs     Restore engine: conflict detection, safe restore (placeholder)
-├── platform.rs    OS-specific abstractions
+├── platform.rs    OS-specific abstractions (os_name, is_posix, is_readonly)
 └── error.rs       Unified error types
 ```
 
@@ -36,6 +36,19 @@ Linux, macOS, and Windows are first-class targets. Platform-specific code is iso
 - Varn never silently overwrites conflicting changes.
 - All errors are actionable and include context.
 - `init` only creates `.varn/` and never touches user files.
+- The scanner never follows symlinks — it records them as symlinks.
+- The scanner collects per-entry errors as warnings instead of aborting.
+
+### Filesystem scanning
+
+The `Scanner` recursively walks a directory tree and produces a sorted list of `TreeEntry` records with SHA-256 content hashes. Key design decisions:
+
+- **`symlink_metadata`** is used so symlinks are recorded as symlinks, not followed. This prevents scanning outside the managed root through symlinks.
+- **SHA-256 content hashing** for regular files enables deduplication and change detection.
+- **The `.varn/` directory at the scan root is skipped** so Varn's own metadata is never included in a snapshot.
+- **Per-entry errors are collected as `ScanWarning`s** rather than aborting the scan. A single inaccessible file does not prevent scanning the rest of the tree.
+- **Entries are sorted by path** for deterministic output.
+- **Directories and symlinks are not hashed** — only regular file contents are hashed.
 
 ### Content-addressed storage (planned)
 
@@ -93,10 +106,10 @@ The `version` field enables future format migrations. The current version is `1`
 
 ## Future Work
 
-1. Filesystem scanning engine (concurrent, with content hashing)
-2. Content-addressed object storage with deduplication
-3. Snapshot creation and persistence
-4. Full diff engine (metadata, permissions, symlinks)
-5. Safe restore with conflict detection and confirmation
-6. Temporary safety checkpoint before restore
-7. Storage-format migration support
+1. Content-addressed object storage with deduplication
+2. Snapshot creation and persistence
+3. Full diff engine (metadata, permissions, symlinks)
+4. Safe restore with conflict detection and confirmation
+5. Temporary safety checkpoint before restore
+6. Storage-format migration support
+7. Concurrent scanning for large directory trees

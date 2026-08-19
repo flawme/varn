@@ -81,6 +81,7 @@ mod tests {
                 size,
                 readonly: false,
                 mtime: None,
+                hash: None,
             },
         }
     }

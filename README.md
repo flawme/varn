@@ -23,7 +23,8 @@ This is the initial foundation. The following is implemented:
 - **`varn init`** — initializes a Varn repository (creates `.varn/` with storage layout and config)
 - Repository discovery (search upward for `.varn/`)
 - Core data models (checkpoint identity, filesystem entries, diff types)
-- Platform abstraction layer
+- **Filesystem scanner** — recursive directory walker with SHA-256 content hashing, symlink awareness, and graceful error handling
+- Platform abstraction layer (os_name, is_posix, is_readonly)
 - `--json` flag for machine-readable output
 
 The following commands are recognized but **not yet implemented**:
