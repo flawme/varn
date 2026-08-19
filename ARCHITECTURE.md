@@ -115,9 +115,9 @@ The `version` field enables future format migrations. The current version is `1`
 
 ## Future Work
 
-1. Safe restore with conflict detection and confirmation
-2. Temporary safety checkpoint before restore
-3. Storage-format migration support
-4. Concurrent scanning for large directory trees
-5. Full diff engine (metadata changes, permissions, symlink targets)
-6. Garbage collection of unreferenced objects
+1. Temporary safety checkpoint before restore
+2. Storage-format migration support
+3. Concurrent scanning for large directory trees
+4. Full diff engine (metadata changes, permissions, symlink targets)
+5. Garbage collection of unreferenced objects
+6. Symlink and special file restoration

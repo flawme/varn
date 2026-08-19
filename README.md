@@ -24,17 +24,17 @@ The following is implemented:
 - **`varn checkpoint`** — captures the current filesystem state with content-addressed storage and deduplication
 - **`varn list`** — displays available checkpoints
 - **`varn diff`** — compares the current state with a checkpoint (added, modified, deleted)
+- **`varn restore`** — restores a checkpoint with conflict detection, confirmation, and post-restore verification
 - Repository discovery (search upward for `.varn/`)
 - Core data models (checkpoint identity, filesystem entries, diff types)
 - **Filesystem scanner** — recursive directory walker with SHA-256 content hashing, symlink awareness, and graceful error handling
 - **Content-addressed object storage** — file contents stored by SHA-256 hash with deduplication and sharded directory layout
 - **Snapshot persistence** — snapshots saved as JSON in `.varn/snapshots/`, with deterministic checkpoint IDs derived from content
+- **Restore safety model** — conflict detection (modified/unexpected files), explicit confirmation, post-restore verification
 - Platform abstraction layer (os_name, is_posix, is_readonly)
 - `--json` flag for machine-readable output
 
-The following command is recognized but **not yet implemented**:
-
-- `varn restore`
+All five MVP commands are implemented.
 
 ## Supported Platforms
 
@@ -47,7 +47,7 @@ varn init [path]           Initialize Varn in a directory (default: current dire
 varn checkpoint <desc>     Capture the current filesystem state
 varn list                  Display available checkpoints
 varn diff <checkpoint>     Compare current state with a checkpoint
-varn restore <checkpoint>  Restore a checkpoint (not yet implemented)
+varn restore <checkpoint>  Restore a checkpoint (--yes to skip confirmation)
 varn --json <command>      Emit machine-readable JSON output
 ```
 

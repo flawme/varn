@@ -8,9 +8,11 @@ use crate::core::CheckpointMeta;
 use crate::error::{Result, VarnError};
 use crate::filesystem::Scanner;
 use crate::platform;
+use crate::restore;
 use crate::snapshot::SnapshotData;
 use crate::storage::Repo;
 use clap::{Parser, Subcommand};
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 /// Varn — local state checkpointing and rollback.
@@ -246,10 +248,111 @@ fn cmd_diff(checkpoint: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `varn restore` — not yet implemented.
-fn cmd_restore(checkpoint: &str, _yes: bool, json: bool) -> Result<()> {
-    let _repo = Repo::open(&PathBuf::from("."))?;
-    emit_not_implemented("restore", json, Some(checkpoint))
+/// `varn restore`
+fn cmd_restore(checkpoint: &str, yes: bool, json: bool) -> Result<()> {
+    let repo = Repo::open(&PathBuf::from("."))?;
+
+    // Load the target snapshot.
+    let snapshot = resolve_checkpoint(&repo, checkpoint)?;
+
+    // Scan the current filesystem state.
+    let scanner = Scanner::new(&repo.root);
+    let current = scanner.scan()?;
+
+    // Plan the restore.
+    let plan = restore::plan_restore(&snapshot.entries, &current.entries);
+
+    // Check for conflicts and confirm.
+    if plan.has_conflicts() && !yes {
+        if json {
+            // In JSON mode with conflicts and no --yes, report and exit.
+            let output = serde_json::json!({
+                "status": "conflicts",
+                "checkpoint": snapshot.meta.id.0,
+                "conflicts": plan.conflicts.iter().map(|c| {
+                    let (kind, path) = match c {
+                        restore::Conflict::Modified { path } => ("modified", path),
+                        restore::Conflict::Unexpected { path } => ("unexpected", path),
+                    };
+                    serde_json::json!({
+                        "kind": kind,
+                        "path": path,
+                    })
+                }).collect::<Vec<_>>(),
+                "actions": plan.action_count(),
+                "message": "Conflicts detected. Re-run with --yes to proceed.",
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+            return Ok(());
+        } else {
+            // Interactive confirmation.
+            println!("Restore of checkpoint {} would:", snapshot.meta.id.0);
+            for c in &plan.conflicts {
+                match c {
+                    restore::Conflict::Modified { path } => {
+                        println!("  OVERWRITE  {}", path.display());
+                    }
+                    restore::Conflict::Unexpected { path } => {
+                        println!("  DELETE     {}", path.display());
+                    }
+                }
+            }
+            println!();
+            print!("Proceed? [y/N] ");
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let input = input.trim().to_lowercase();
+            if input != "y" && input != "yes" {
+                println!("Restore cancelled. No changes were made.");
+                return Ok(());
+            }
+        }
+    }
+
+    // Execute the restore.
+    let mut result = restore::execute_restore(&plan, &repo.root, &repo.object_store())?;
+
+    // Verify the restore.
+    result.verified = restore::verify_restore(&repo.root, &snapshot.entries);
+
+    if json {
+        let output = serde_json::json!({
+            "status": if result.verified { "ok" } else { "verification_failed" },
+            "checkpoint": snapshot.meta.id.0,
+            "files_written": result.files_written,
+            "dirs_created": result.dirs_created,
+            "deleted": result.deleted,
+            "verified": result.verified,
+            "warnings": result.warnings,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("Restored checkpoint {}", snapshot.meta.id.0);
+        println!("  files written: {}", result.files_written);
+        println!("  directories created: {}", result.dirs_created);
+        println!("  deleted: {}", result.deleted);
+        if result.verified {
+            println!("  verification: passed");
+        } else {
+            println!("  verification: FAILED");
+        }
+        if !result.warnings.is_empty() {
+            println!("  warnings:");
+            for w in &result.warnings {
+                println!("    {w}");
+            }
+        }
+    }
+
+    if !result.verified {
+        return Err(VarnError::Other(
+            "restore verification failed: filesystem state does not match checkpoint".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Resolve a checkpoint ID (full or prefix) to a [`SnapshotData`].
@@ -282,26 +385,6 @@ fn resolve_checkpoint(repo: &Repo, id_or_prefix: &str) -> Result<SnapshotData> {
             matches.len()
         ))),
     }
-}
-
-/// Emit a consistent "not implemented" message for commands that are
-/// recognized but not yet functional.
-fn emit_not_implemented(command: &'static str, json: bool, detail: Option<&str>) -> Result<()> {
-    let msg = match detail {
-        Some(d) => format!("{command} ({d}) is not yet implemented in this version"),
-        None => format!("{command} is not yet implemented in this version"),
-    };
-    if json {
-        let output = serde_json::json!({
-            "status": "not_implemented",
-            "command": command,
-            "message": msg,
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        println!("{msg}");
-    }
-    Ok(())
 }
 
 /// Resolve a possibly-relative path to an absolute one without following
