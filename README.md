@@ -25,16 +25,20 @@ The following is implemented:
 - **`varn list`** — displays available checkpoints
 - **`varn diff`** — compares the current state with a checkpoint (added, modified, deleted)
 - **`varn restore`** — restores a checkpoint with conflict detection, confirmation, and post-restore verification
+- **Safety checkpoint before restore** — automatically creates a checkpoint of the current state before restoring, so a failed or unwanted restore can be undone
 - Repository discovery (search upward for `.varn/`)
 - Core data models (checkpoint identity, filesystem entries, diff types)
-- **Filesystem scanner** — recursive directory walker with SHA-256 content hashing, symlink awareness, and graceful error handling
+- **Filesystem scanner** — recursive directory walker with SHA-256 content hashing, symlink awareness (target capture), and graceful error handling
 - **Content-addressed object storage** — file contents stored by SHA-256 hash with deduplication and sharded directory layout
 - **Snapshot persistence** — snapshots saved as JSON in `.varn/snapshots/`, with deterministic checkpoint IDs derived from content
-- **Restore safety model** — conflict detection (modified/unexpected files), explicit confirmation, post-restore verification
-- Platform abstraction layer (os_name, is_posix, is_readonly)
+- **Idempotent checkpointing** — checkpointing the same state twice does not duplicate or overwrite; the second checkpoint is a no-op
+- **Restore safety model** — conflict detection (modified/unexpected files), explicit confirmation, post-restore verification, safety checkpoint before restore
+- **Symlink restoration** — symlinks are scanned with their targets, checkpointed, and fully restored (including target changes as conflicts)
+- **Garbage collection** — `varn gc` removes objects from the store that no snapshot references, with `--dry-run` support
+- Platform abstraction layer (os_name, is_posix, is_readonly, create_symlink)
 - `--json` flag for machine-readable output
 
-All five MVP commands are implemented.
+All five MVP commands are implemented, plus garbage collection.
 
 ## Supported Platforms
 
@@ -47,7 +51,8 @@ varn init [path]           Initialize Varn in a directory (default: current dire
 varn checkpoint <desc>     Capture the current filesystem state
 varn list                  Display available checkpoints
 varn diff <checkpoint>     Compare current state with a checkpoint
-varn restore <checkpoint>  Restore a checkpoint (--yes to skip confirmation)
+varn restore <checkpoint>  Restore a checkpoint (--yes to skip confirmation, --no-safety to skip safety checkpoint)
+varn gc                    Remove unreferenced objects from the store (--dry-run to preview)
 varn --json <command>      Emit machine-readable JSON output
 ```
 
@@ -72,6 +77,8 @@ The storage format is versioned (`config.json` contains a `version` field) to su
 - Varn does not modify files outside `.varn/` during `init`.
 - Varn coexists with Git and never modifies Git metadata.
 - No network communication, no telemetry, no account required.
+- **Safety checkpoint before restore**: by default, `varn restore` creates a checkpoint of the current state before restoring. This safety checkpoint can be used to undo a failed or unwanted restore. Use `--no-safety` to skip this.
+- **Idempotent checkpointing**: checkpointing the same state twice does not duplicate or overwrite. The second checkpoint is a no-op, reported as `status: "unchanged"` in JSON mode.
 
 ## Development
 

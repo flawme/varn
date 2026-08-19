@@ -418,3 +418,139 @@ fn restore_full_workflow_checkpoint_modify_restore() {
         "[package]"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn restore_symlink_from_checkpoint() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let repo = Repo::init(tmp.path(), "linux").unwrap();
+    write_file(tmp.path(), "target.txt", b"target content");
+    symlink(tmp.path().join("target.txt"), tmp.path().join("link.txt")).unwrap();
+
+    let snapshot = checkpoint(&repo, "with symlink");
+
+    // Delete the symlink.
+    fs::remove_file(tmp.path().join("link.txt")).unwrap();
+
+    let plan = plan_against_current(&repo, &snapshot);
+    assert!(
+        plan.actions
+            .iter()
+            .any(|a| matches!(a, RestoreAction::CreateSymlink { .. })),
+        "plan should include a CreateSymlink action"
+    );
+
+    let result = restore::execute_restore(&plan, &repo.root, &repo.object_store()).unwrap();
+    assert_eq!(result.symlinks_created, 1);
+
+    // The symlink should be restored.
+    let link_path = tmp.path().join("link.txt");
+    assert!(link_path.is_symlink());
+    assert_eq!(
+        fs::read_link(&link_path).unwrap(),
+        tmp.path().join("target.txt")
+    );
+
+    assert!(restore::verify_restore(&repo.root, &snapshot.entries));
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_symlink_with_changed_target() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let repo = Repo::init(tmp.path(), "linux").unwrap();
+    write_file(tmp.path(), "original_target.txt", b"original");
+    symlink(
+        tmp.path().join("original_target.txt"),
+        tmp.path().join("link.txt"),
+    )
+    .unwrap();
+
+    let snapshot = checkpoint(&repo, "symlink v1");
+
+    // Change the symlink target.
+    fs::remove_file(tmp.path().join("link.txt")).unwrap();
+    write_file(tmp.path(), "new_target.txt", b"new");
+    symlink(
+        tmp.path().join("new_target.txt"),
+        tmp.path().join("link.txt"),
+    )
+    .unwrap();
+
+    let plan = plan_against_current(&repo, &snapshot);
+    assert!(plan.has_conflicts(), "changed symlink should be a conflict");
+
+    let result = restore::execute_restore(&plan, &repo.root, &repo.object_store()).unwrap();
+    assert_eq!(result.symlinks_created, 1);
+
+    // The symlink should point to the original target.
+    let link_path = tmp.path().join("link.txt");
+    assert!(link_path.is_symlink());
+    assert_eq!(
+        fs::read_link(&link_path).unwrap(),
+        tmp.path().join("original_target.txt")
+    );
+
+    assert!(restore::verify_restore(&repo.root, &snapshot.entries));
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_full_workflow_with_symlinks() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let repo = Repo::init(tmp.path(), "linux").unwrap();
+
+    // Set up state with files and symlinks.
+    write_file(tmp.path(), "src/main.rs", b"fn main() {}");
+    write_file(tmp.path(), "src/config.txt", b"config");
+    symlink(
+        tmp.path().join("src/config.txt"),
+        tmp.path().join("config_link"),
+    )
+    .unwrap();
+    symlink(
+        Path::new("../src/main.rs"),
+        tmp.path().join("src/main_link"),
+    )
+    .unwrap();
+
+    let snapshot = checkpoint(&repo, "initial state");
+
+    // Make changes: modify file, delete symlink, add new file.
+    write_file(
+        tmp.path(),
+        "src/main.rs",
+        b"fn main() { println!(\"hi\"); }",
+    );
+    fs::remove_file(tmp.path().join("config_link")).unwrap();
+    write_file(tmp.path(), "new_file.txt", b"new");
+
+    // Plan and execute the restore.
+    let plan = plan_against_current(&repo, &snapshot);
+    let _result = restore::execute_restore(&plan, &repo.root, &repo.object_store()).unwrap();
+
+    // Verify the restore.
+    assert!(
+        restore::verify_restore(&repo.root, &snapshot.entries),
+        "filesystem should match snapshot after restore"
+    );
+
+    // Check the symlink is restored.
+    let link_path = tmp.path().join("config_link");
+    assert!(link_path.is_symlink());
+    assert_eq!(
+        fs::read_link(&link_path).unwrap(),
+        tmp.path().join("src/config.txt")
+    );
+
+    // Check the relative symlink is restored.
+    let main_link = tmp.path().join("src/main_link");
+    assert!(main_link.is_symlink());
+    assert_eq!(
+        fs::read_link(&main_link).unwrap(),
+        Path::new("../src/main.rs")
+    );
+}

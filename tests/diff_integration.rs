@@ -16,6 +16,7 @@ fn file_entry(path: &str, size: u64) -> TreeEntry {
             readonly: false,
             mtime: None,
             hash: None,
+            target: None,
         },
     }
 }
@@ -29,6 +30,7 @@ fn dir_entry(path: &str) -> TreeEntry {
             readonly: false,
             mtime: None,
             hash: None,
+            target: None,
         },
     }
 }
@@ -89,6 +91,7 @@ fn diff_detects_modified_readonly() {
             readonly: false,
             mtime: None,
             hash: None,
+            target: None,
         },
     }];
     let new = vec![TreeEntry {
@@ -99,6 +102,7 @@ fn diff_detects_modified_readonly() {
             readonly: true,
             mtime: None,
             hash: None,
+            target: None,
         },
     }];
     let changes = diff_states(&old, &new);

@@ -82,6 +82,7 @@ mod tests {
                 readonly: false,
                 mtime: None,
                 hash: None,
+                target: None,
             },
         }
     }

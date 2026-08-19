@@ -43,6 +43,8 @@ pub enum RestoreAction {
     WriteFile { path: PathBuf, hash: String },
     /// Create a directory.
     CreateDir { path: PathBuf },
+    /// Create a symbolic link pointing to `target`.
+    CreateSymlink { path: PathBuf, target: PathBuf },
     /// Delete a file or directory that exists now but not in the checkpoint.
     Delete { path: PathBuf },
 }
@@ -75,6 +77,8 @@ pub struct RestoreResult {
     pub files_written: usize,
     /// Number of directories created.
     pub dirs_created: usize,
+    /// Number of symlinks created.
+    pub symlinks_created: usize,
     /// Number of files/directories deleted.
     pub deleted: usize,
     /// Whether the post-restore verification passed.
@@ -116,8 +120,16 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                             path: (*path).clone(),
                         });
                     }
-                    EntryKind::Symlink | EntryKind::Other => {
-                        // Symlinks and other types are not restored in this version.
+                    EntryKind::Symlink => {
+                        if let Some(ref target) = snap_entry.meta.target {
+                            actions.push(RestoreAction::CreateSymlink {
+                                path: (*path).clone(),
+                                target: target.clone(),
+                            });
+                        }
+                    }
+                    EntryKind::Other => {
+                        // Other entry types are not restored in this version.
                     }
                 }
             }
@@ -147,8 +159,16 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                                 path: (*path).clone(),
                             });
                         }
-                        EntryKind::Symlink | EntryKind::Other => {
-                            // Symlinks and other types are not restored.
+                        EntryKind::Symlink => {
+                            if let Some(ref target) = snap_entry.meta.target {
+                                actions.push(RestoreAction::CreateSymlink {
+                                    path: (*path).clone(),
+                                    target: target.clone(),
+                                });
+                            }
+                        }
+                        EntryKind::Other => {
+                            // Other entry types are not restored.
                         }
                     }
                 } else if snap_entry.meta.kind == EntryKind::File {
@@ -171,6 +191,27 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                         }
                     }
                     // If hashes match, no action needed.
+                } else if snap_entry.meta.kind == EntryKind::Symlink {
+                    // Compare symlink targets.
+                    let snap_target = snap_entry.meta.target.as_deref();
+                    let curr_target = curr_entry.meta.target.as_deref();
+                    if snap_target != curr_target {
+                        // Symlink target changed — conflict.
+                        conflicts.push(Conflict::Modified {
+                            path: (*path).clone(),
+                        });
+                        if let Some(ref target) = snap_entry.meta.target {
+                            // Delete the old symlink, then create the new one.
+                            actions.push(RestoreAction::Delete {
+                                path: (*path).clone(),
+                            });
+                            actions.push(RestoreAction::CreateSymlink {
+                                path: (*path).clone(),
+                                target: target.clone(),
+                            });
+                        }
+                    }
+                    // If targets match, no action needed.
                 }
                 // Directories with matching kind: no action needed.
             }
@@ -193,27 +234,28 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
     // 1. Delete entries that are being replaced (kind changes) — must happen
     //    before creating the new version at the same path.
     // 2. Create directories (parents before children)
-    // 3. Write files
+    // 3. Write files and create symlinks
     // 4. Delete unexpected entries (not in snapshot) — last, so we don't
     //    delete a dir then try to create inside it.
     //
     // We distinguish "replace" deletes from "unexpected" deletes by checking
-    // whether the path also has a Create/Write action in the plan.
+    // whether the path also has a Create/Write/Symlink action in the plan.
     let create_paths: std::collections::HashSet<PathBuf> = actions
         .iter()
         .filter_map(|a| match a {
-            RestoreAction::CreateDir { path } | RestoreAction::WriteFile { path, .. } => {
-                Some(path.clone())
-            }
+            RestoreAction::CreateDir { path }
+            | RestoreAction::WriteFile { path, .. }
+            | RestoreAction::CreateSymlink { path, .. } => Some(path.clone()),
             _ => None,
         })
         .collect();
 
     actions.sort_by_key(|a| match a {
-        // Replace deletes (same path has a create/write) go first.
+        // Replace deletes (same path has a create/write/symlink) go first.
         RestoreAction::Delete { path } if create_paths.contains(path) => (0, path.clone()),
         RestoreAction::CreateDir { path } => (1, path.clone()),
         RestoreAction::WriteFile { path, .. } => (2, path.clone()),
+        RestoreAction::CreateSymlink { path, .. } => (2, path.clone()),
         // Unexpected deletes go last.
         RestoreAction::Delete { path } => (3, path.clone()),
     });
@@ -238,6 +280,7 @@ pub fn execute_restore(
 ) -> Result<RestoreResult> {
     let mut files_written = 0;
     let mut dirs_created = 0;
+    let mut symlinks_created = 0;
     let mut deleted = 0;
     let mut warnings = Vec::new();
 
@@ -265,6 +308,25 @@ pub fn execute_restore(
                 fs::write(&full, &content)?;
                 files_written += 1;
             }
+            RestoreAction::CreateSymlink { path, target } => {
+                let full = root.join(path);
+                // Ensure parent directory exists.
+                if let Some(parent) = full.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                // If something already exists at this path, remove it first.
+                // (This can happen for replace-delete + create sequences.)
+                if full.exists() || fs::symlink_metadata(&full).is_ok() {
+                    let meta = fs::symlink_metadata(&full)?;
+                    if meta.is_dir() {
+                        fs::remove_dir_all(&full)?;
+                    } else {
+                        fs::remove_file(&full)?;
+                    }
+                }
+                crate::platform::create_symlink(target, &full)?;
+                symlinks_created += 1;
+            }
             RestoreAction::Delete { path } => {
                 let full = root.join(path);
                 let meta = match fs::symlink_metadata(&full) {
@@ -289,6 +351,7 @@ pub fn execute_restore(
     Ok(RestoreResult {
         files_written,
         dirs_created,
+        symlinks_created,
         deleted,
         verified: false,
         warnings,
@@ -327,6 +390,12 @@ pub fn verify_restore(root: &Path, snapshot: &[TreeEntry]) -> bool {
                 if entry.meta.kind == EntryKind::File && entry.meta.hash != snap_entry.meta.hash {
                     return false;
                 }
+                // For symlinks, compare target.
+                if entry.meta.kind == EntryKind::Symlink
+                    && entry.meta.target != snap_entry.meta.target
+                {
+                    return false;
+                }
                 // For directories, just kind matching is sufficient.
             }
         }
@@ -352,6 +421,7 @@ mod tests {
                 readonly: false,
                 mtime: None,
                 hash: hash.map(String::from),
+                target: None,
             },
         }
     }
@@ -365,6 +435,21 @@ mod tests {
                 readonly: false,
                 mtime: None,
                 hash: None,
+                target: None,
+            },
+        }
+    }
+
+    fn symlink_entry(path: &str, target: &str) -> TreeEntry {
+        TreeEntry {
+            path: PathBuf::from(path),
+            meta: EntryMeta {
+                kind: EntryKind::Symlink,
+                size: 0,
+                readonly: false,
+                mtime: None,
+                hash: None,
+                target: Some(PathBuf::from(target)),
             },
         }
     }
@@ -483,6 +568,7 @@ mod tests {
             .map(|a| match a {
                 RestoreAction::CreateDir { .. } => 0,
                 RestoreAction::WriteFile { .. } => 1,
+                RestoreAction::CreateSymlink { .. } => 1,
                 RestoreAction::Delete { .. } => 2,
             })
             .collect();
@@ -509,6 +595,163 @@ mod tests {
         assert_eq!(plan.conflicts.len(), 2);
         // Actions: write restore.txt, delete unexpected.txt.
         assert_eq!(plan.actions.len(), 2);
+    }
+
+    #[test]
+    fn plan_restore_missing_symlink_needs_create() {
+        let snapshot = vec![symlink_entry("link.txt", "target.txt")];
+        let current = vec![];
+        let plan = plan_restore(&snapshot, &current);
+        assert!(!plan.has_conflicts());
+        assert_eq!(plan.actions.len(), 1);
+        assert!(matches!(
+            plan.actions[0],
+            RestoreAction::CreateSymlink { .. }
+        ));
+    }
+
+    #[test]
+    fn plan_restore_matching_symlink_no_action() {
+        let snapshot = vec![symlink_entry("link.txt", "target.txt")];
+        let current = vec![symlink_entry("link.txt", "target.txt")];
+        let plan = plan_restore(&snapshot, &current);
+        assert!(plan.actions.is_empty());
+        assert!(plan.conflicts.is_empty());
+    }
+
+    #[test]
+    fn plan_restore_changed_symlink_target_is_conflict() {
+        let snapshot = vec![symlink_entry("link.txt", "target_a.txt")];
+        let current = vec![symlink_entry("link.txt", "target_b.txt")];
+        let plan = plan_restore(&snapshot, &current);
+        assert!(plan.has_conflicts());
+        assert_eq!(plan.conflicts.len(), 1);
+        assert!(matches!(plan.conflicts[0], Conflict::Modified { .. }));
+        // Should have a delete + create symlink sequence.
+        assert!(
+            plan.actions
+                .iter()
+                .any(|a| matches!(a, RestoreAction::Delete { .. })),
+            "should delete old symlink"
+        );
+        assert!(
+            plan.actions
+                .iter()
+                .any(|a| matches!(a, RestoreAction::CreateSymlink { .. })),
+            "should create new symlink"
+        );
+        // Delete must come before create.
+        let delete_idx = plan
+            .actions
+            .iter()
+            .position(|a| matches!(a, RestoreAction::Delete { .. }))
+            .unwrap();
+        let create_idx = plan
+            .actions
+            .iter()
+            .position(|a| matches!(a, RestoreAction::CreateSymlink { .. }))
+            .unwrap();
+        assert!(delete_idx < create_idx, "delete must come before create");
+    }
+
+    #[test]
+    fn plan_restore_symlink_to_file_kind_change() {
+        let snapshot = vec![symlink_entry("link.txt", "target.txt")];
+        let current = vec![file_entry("link.txt", Some("hash1"))];
+        let plan = plan_restore(&snapshot, &current);
+        assert!(plan.has_conflicts());
+        assert!(
+            plan.actions
+                .iter()
+                .any(|a| matches!(a, RestoreAction::Delete { .. }))
+        );
+        assert!(
+            plan.actions
+                .iter()
+                .any(|a| matches!(a, RestoreAction::CreateSymlink { .. }))
+        );
+    }
+
+    #[test]
+    fn execute_restore_creates_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repo::init(tmp.path(), "linux").unwrap();
+        let store = repo.object_store();
+
+        let plan = RestorePlan {
+            actions: vec![RestoreAction::CreateSymlink {
+                path: PathBuf::from("link.txt"),
+                target: PathBuf::from("target.txt"),
+            }],
+            conflicts: vec![],
+        };
+
+        let result = execute_restore(&plan, tmp.path(), &store).unwrap();
+        assert_eq!(result.symlinks_created, 1);
+
+        let link_path = tmp.path().join("link.txt");
+        assert!(link_path.is_symlink());
+        assert_eq!(
+            fs::read_link(&link_path).unwrap(),
+            PathBuf::from("target.txt")
+        );
+    }
+
+    #[test]
+    fn execute_restore_replaces_symlink_with_new_target() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repo::init(tmp.path(), "linux").unwrap();
+        let store = repo.object_store();
+
+        // Create an existing symlink.
+        crate::platform::create_symlink(
+            &PathBuf::from("old_target.txt"),
+            &tmp.path().join("link.txt"),
+        )
+        .unwrap();
+
+        // Plan: delete old + create new.
+        let plan = RestorePlan {
+            actions: vec![
+                RestoreAction::Delete {
+                    path: PathBuf::from("link.txt"),
+                },
+                RestoreAction::CreateSymlink {
+                    path: PathBuf::from("link.txt"),
+                    target: PathBuf::from("new_target.txt"),
+                },
+            ],
+            conflicts: vec![],
+        };
+
+        let result = execute_restore(&plan, tmp.path(), &store).unwrap();
+        assert_eq!(result.symlinks_created, 1);
+
+        let link_path = tmp.path().join("link.txt");
+        assert!(link_path.is_symlink());
+        assert_eq!(
+            fs::read_link(&link_path).unwrap(),
+            PathBuf::from("new_target.txt")
+        );
+    }
+
+    #[test]
+    fn execute_restore_creates_nested_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repo::init(tmp.path(), "linux").unwrap();
+        let store = repo.object_store();
+
+        let plan = RestorePlan {
+            actions: vec![RestoreAction::CreateSymlink {
+                path: PathBuf::from("a/b/link.txt"),
+                target: PathBuf::from("target.txt"),
+            }],
+            conflicts: vec![],
+        };
+
+        let result = execute_restore(&plan, tmp.path(), &store).unwrap();
+        assert_eq!(result.symlinks_created, 1);
+        assert!(tmp.path().join("a/b/link.txt").is_symlink());
     }
 
     #[test]

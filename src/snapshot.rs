@@ -53,18 +53,33 @@ impl SnapshotData {
         Self { meta, entries }
     }
 
+    /// Check whether a snapshot with the given ID already exists on disk.
+    pub fn exists(snapshots_dir: &Path, id: &str) -> bool {
+        snapshots_dir
+            .join(format!("{id}.{}", Self::EXTENSION))
+            .exists()
+    }
+
     /// Serialize and write the snapshot to `<snapshots_dir>/<id>.json`.
     ///
     /// Uses an atomic temp-file-then-rename strategy.
-    pub fn save(&self, snapshots_dir: &Path) -> Result<()> {
+    ///
+    /// If a snapshot with the same ID already exists, it is **not**
+    /// overwritten — the existing file is kept and `false` is returned.
+    /// This makes checkpointing idempotent: the same state checkpointed
+    /// twice produces the same ID and does not duplicate or overwrite.
+    pub fn save(&self, snapshots_dir: &Path) -> Result<bool> {
         fs::create_dir_all(snapshots_dir)?;
         let filename = format!("{}.{}", self.meta.id.0, Self::EXTENSION);
         let path = snapshots_dir.join(filename);
+        if path.exists() {
+            return Ok(false);
+        }
         let json = serde_json::to_string_pretty(self)?;
         let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, json)?;
         fs::rename(&tmp, &path)?;
-        Ok(())
+        Ok(true)
     }
 
     /// Load a snapshot from a JSON file.
@@ -106,6 +121,18 @@ impl SnapshotData {
         }
         snapshots.sort_by_key(|s| s.meta.created_at);
         Ok(snapshots)
+    }
+
+    /// Collect the set of object hashes referenced by this snapshot's file
+    /// entries.
+    ///
+    /// Only regular file entries with a content hash are included. Directories,
+    /// symlinks, and entries without a hash are skipped.
+    pub fn referenced_hashes(&self) -> std::collections::HashSet<&str> {
+        self.entries
+            .iter()
+            .filter_map(|e| e.meta.hash.as_deref())
+            .collect()
     }
 
     /// Store file content blobs into the object store.
@@ -169,6 +196,10 @@ fn generate_checkpoint_id(meta: &CheckpointMeta, entries: &[TreeEntry]) -> Strin
             crate::filesystem::EntryKind::Symlink => b"syml",
             crate::filesystem::EntryKind::Other => b"othr",
         });
+        // Include symlink target so different targets produce different IDs.
+        if let Some(ref target) = entry.meta.target {
+            hasher.update(target.to_string_lossy().as_bytes());
+        }
     }
     let digest = hasher.finalize();
     format!("{:.12x}", digest)
@@ -200,6 +231,7 @@ mod tests {
                 readonly: false,
                 mtime: None,
                 hash: hash.map(String::from),
+                target: None,
             },
         }
     }
@@ -288,9 +320,47 @@ mod tests {
         let data = SnapshotData::new(meta, entries);
         let id = data.meta.id.0.clone();
 
-        data.save(&snapshots_dir).unwrap();
+        let saved = data.save(&snapshots_dir).unwrap();
+        assert!(saved, "first save should report true");
         let loaded = SnapshotData::load_by_id(&snapshots_dir, &id).unwrap();
         assert_eq!(data, loaded);
+    }
+
+    #[test]
+    fn snapshot_save_is_idempotent_for_duplicate() {
+        let tmp = TempDir::new().unwrap();
+        let snapshots_dir = tmp.path().join("snapshots");
+
+        let meta = make_meta();
+        let entries = vec![make_entry("a.txt", Some("abc123"))];
+        let data = SnapshotData::new(meta, entries);
+
+        // First save writes the file.
+        let saved1 = data.save(&snapshots_dir).unwrap();
+        assert!(saved1);
+
+        // Second save with identical content is a no-op.
+        let saved2 = data.save(&snapshots_dir).unwrap();
+        assert!(!saved2, "duplicate save should report false");
+
+        // Only one snapshot file should exist.
+        let list = SnapshotData::list_all(&snapshots_dir).unwrap();
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_exists_checks_disk() {
+        let tmp = TempDir::new().unwrap();
+        let snapshots_dir = tmp.path().join("snapshots");
+
+        let meta = make_meta();
+        let entries = vec![make_entry("a.txt", Some("abc123"))];
+        let data = SnapshotData::new(meta, entries);
+        let id = data.meta.id.0.clone();
+
+        assert!(!SnapshotData::exists(&snapshots_dir, &id));
+        data.save(&snapshots_dir).unwrap();
+        assert!(SnapshotData::exists(&snapshots_dir, &id));
     }
 
     #[test]
@@ -363,6 +433,7 @@ mod tests {
                     readonly: false,
                     mtime: None,
                     hash: Some(hash.clone()),
+                    target: None,
                 },
             },
             TreeEntry {
@@ -373,6 +444,7 @@ mod tests {
                     readonly: false,
                     mtime: None,
                     hash: Some(hash.clone()),
+                    target: None,
                 },
             },
         ];
@@ -408,6 +480,7 @@ mod tests {
                 readonly: false,
                 mtime: None,
                 hash: None,
+                target: None,
             },
         }];
 
@@ -420,5 +493,33 @@ mod tests {
         let data = SnapshotData::new(meta, entries);
         // Should not error — directories are skipped.
         data.store_content_blobs(root, &store).unwrap();
+    }
+
+    #[test]
+    fn referenced_hashes_collects_file_hashes() {
+        let meta = make_meta();
+        let entries = vec![
+            make_entry("a.txt", Some("hash_a")),
+            make_entry("b.txt", Some("hash_b")),
+            make_entry("c.txt", None),
+        ];
+        let data = SnapshotData::new(meta, entries);
+        let hashes = data.referenced_hashes();
+        assert_eq!(hashes.len(), 2);
+        assert!(hashes.contains("hash_a"));
+        assert!(hashes.contains("hash_b"));
+    }
+
+    #[test]
+    fn referenced_hashes_deduplicates_identical() {
+        let meta = make_meta();
+        let entries = vec![
+            make_entry("a.txt", Some("same_hash")),
+            make_entry("b.txt", Some("same_hash")),
+        ];
+        let data = SnapshotData::new(meta, entries);
+        let hashes = data.referenced_hashes();
+        assert_eq!(hashes.len(), 1);
+        assert!(hashes.contains("same_hash"));
     }
 }

@@ -50,6 +50,35 @@ pub fn is_readonly_meta(meta: &fs::Metadata) -> bool {
     }
 }
 
+/// Create a symbolic link at `link` pointing to `target`.
+///
+/// On Unix, this uses `symlink` which works for both files and directories.
+/// On Windows, creating symlinks requires Developer Mode or administrator
+/// privileges. File links use `symlink_file`; directory links use
+/// `symlink_dir`.
+pub fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        if target.is_dir() {
+            std::os::windows::fs::symlink_dir(target, link)
+        } else {
+            std::os::windows::fs::symlink_file(target, link)
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, link);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "symlinks are not supported on this platform",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,5 +124,33 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let missing = tmp.path().join("does_not_exist");
         assert!(!is_readonly(&missing));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_symlink_creates_link() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("target.txt");
+        std::fs::write(&target, b"hello").unwrap();
+        let link = tmp.path().join("link.txt");
+
+        create_symlink(&target, &link).unwrap();
+
+        assert!(link.is_symlink());
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_symlink_creates_dir_link() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("target_dir");
+        std::fs::create_dir(&target).unwrap();
+        let link = tmp.path().join("link_dir");
+
+        create_symlink(&target, &link).unwrap();
+
+        assert!(link.is_symlink());
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
     }
 }

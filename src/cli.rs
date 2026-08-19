@@ -55,6 +55,19 @@ pub enum Command {
         /// Skip confirmation prompts (use with care).
         #[arg(long)]
         yes: bool,
+        /// Skip creating a safety checkpoint before restore.
+        ///
+        /// By default, Varn creates a checkpoint of the current state
+        /// before restoring, so a failed restore can be undone. Use this
+        /// flag to skip that safety measure.
+        #[arg(long)]
+        no_safety: bool,
+    },
+    /// Remove objects from the store that no snapshot references.
+    Gc {
+        /// Show what would be deleted without actually deleting.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -65,7 +78,12 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Checkpoint { description } => cmd_checkpoint(&description, cli.json),
         Command::List => cmd_list(cli.json),
         Command::Diff { checkpoint } => cmd_diff(&checkpoint, cli.json),
-        Command::Restore { checkpoint, yes } => cmd_restore(&checkpoint, yes, cli.json),
+        Command::Restore {
+            checkpoint,
+            yes,
+            no_safety,
+        } => cmd_restore(&checkpoint, yes, no_safety, cli.json),
+        Command::Gc { dry_run } => cmd_gc(dry_run, cli.json),
     }
 }
 
@@ -110,18 +128,19 @@ fn cmd_checkpoint(description: &str, json: bool) -> Result<()> {
     // Store file content blobs in the object store.
     snapshot.store_content_blobs(&repo.root, &repo.object_store())?;
 
-    // Persist the snapshot.
-    snapshot.save(&repo.snapshots_dir())?;
+    // Persist the snapshot (idempotent: no-op if an identical one exists).
+    let saved = snapshot.save(&repo.snapshots_dir())?;
 
     // Report any scan warnings.
     if json {
         let output = serde_json::json!({
-            "status": "ok",
+            "status": if saved { "ok" } else { "unchanged" },
             "checkpoint_id": snapshot.meta.id.0,
             "description": snapshot.meta.description,
             "created_at": snapshot.meta.created_at,
             "root": snapshot.meta.root,
             "entries": snapshot.entries.len(),
+            "saved": saved,
             "warnings": scan_result.warnings.iter().map(|w| {
                 serde_json::json!({
                     "path": w.path,
@@ -131,10 +150,17 @@ fn cmd_checkpoint(description: &str, json: bool) -> Result<()> {
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        println!(
-            "Checkpoint {} created: {}",
-            snapshot.meta.id.0, snapshot.meta.description
-        );
+        if saved {
+            println!(
+                "Checkpoint {} created: {}",
+                snapshot.meta.id.0, snapshot.meta.description
+            );
+        } else {
+            println!(
+                "Checkpoint {} already exists (no changes): {}",
+                snapshot.meta.id.0, snapshot.meta.description
+            );
+        }
         println!("  entries: {}", snapshot.entries.len());
         if !scan_result.warnings.is_empty() {
             println!("  warnings: {}", scan_result.warnings.len());
@@ -249,7 +275,7 @@ fn cmd_diff(checkpoint: &str, json: bool) -> Result<()> {
 }
 
 /// `varn restore`
-fn cmd_restore(checkpoint: &str, yes: bool, json: bool) -> Result<()> {
+fn cmd_restore(checkpoint: &str, yes: bool, no_safety: bool, json: bool) -> Result<()> {
     let repo = Repo::open(&PathBuf::from("."))?;
 
     // Load the target snapshot.
@@ -311,6 +337,35 @@ fn cmd_restore(checkpoint: &str, yes: bool, json: bool) -> Result<()> {
         }
     }
 
+    // Create a safety checkpoint of the current state before restoring.
+    // This allows the user to undo a failed or unwanted restore.
+    let safety_id = if !no_safety {
+        let safety_meta = CheckpointMeta {
+            id: crate::core::CheckpointId("pending".to_string()),
+            description: format!(
+                "[safety before restore of {}] {}",
+                snapshot.meta.id.0, snapshot.meta.description
+            ),
+            created_at: now_unix(),
+            root: repo.root.clone(),
+        };
+        let safety_snapshot = SnapshotData::new(safety_meta, current.entries.clone());
+        // Store content blobs so the safety checkpoint is restorable.
+        safety_snapshot.store_content_blobs(&repo.root, &repo.object_store())?;
+        let saved = safety_snapshot.save(&repo.snapshots_dir())?;
+        let id = safety_snapshot.meta.id.0.clone();
+        if saved {
+            if !json {
+                println!("Safety checkpoint {} created before restore.", id);
+            }
+        } else if !json {
+            println!("Safety checkpoint {} already exists.", id);
+        }
+        Some(id)
+    } else {
+        None
+    };
+
     // Execute the restore.
     let mut result = restore::execute_restore(&plan, &repo.root, &repo.object_store())?;
 
@@ -321,8 +376,10 @@ fn cmd_restore(checkpoint: &str, yes: bool, json: bool) -> Result<()> {
         let output = serde_json::json!({
             "status": if result.verified { "ok" } else { "verification_failed" },
             "checkpoint": snapshot.meta.id.0,
+            "safety_checkpoint": safety_id,
             "files_written": result.files_written,
             "dirs_created": result.dirs_created,
+            "symlinks_created": result.symlinks_created,
             "deleted": result.deleted,
             "verified": result.verified,
             "warnings": result.warnings,
@@ -332,11 +389,17 @@ fn cmd_restore(checkpoint: &str, yes: bool, json: bool) -> Result<()> {
         println!("Restored checkpoint {}", snapshot.meta.id.0);
         println!("  files written: {}", result.files_written);
         println!("  directories created: {}", result.dirs_created);
+        println!("  symlinks created: {}", result.symlinks_created);
         println!("  deleted: {}", result.deleted);
         if result.verified {
             println!("  verification: passed");
         } else {
             println!("  verification: FAILED");
+        }
+        if let Some(ref sid) = safety_id {
+            if !result.verified {
+                println!("  safety checkpoint {} can be used to recover", sid);
+            }
         }
         if !result.warnings.is_empty() {
             println!("  warnings:");
@@ -347,11 +410,53 @@ fn cmd_restore(checkpoint: &str, yes: bool, json: bool) -> Result<()> {
     }
 
     if !result.verified {
-        return Err(VarnError::Other(
-            "restore verification failed: filesystem state does not match checkpoint".to_string(),
-        ));
+        return Err(VarnError::Other(format!(
+            "restore verification failed: filesystem state does not match checkpoint{}",
+            safety_id
+                .as_ref()
+                .map(|id| format!("; safety checkpoint {id} available for recovery"))
+                .unwrap_or_default()
+        )));
     }
 
+    Ok(())
+}
+
+/// `varn gc`
+fn cmd_gc(dry_run: bool, json: bool) -> Result<()> {
+    let repo = Repo::open(&PathBuf::from("."))?;
+    let result = crate::storage::garbage_collect(&repo, dry_run)?;
+
+    if json {
+        let output = serde_json::json!({
+            "status": "ok",
+            "dry_run": dry_run,
+            "total_objects": result.total_objects,
+            "referenced_objects": result.referenced_objects,
+            "deleted": result.deleted,
+            "deleted_hashes": result.deleted_hashes,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        if dry_run {
+            println!("Garbage collection (dry run):");
+        } else {
+            println!("Garbage collection complete:");
+        }
+        println!("  total objects: {}", result.total_objects);
+        println!("  referenced: {}", result.referenced_objects);
+        println!(
+            "  {}: {}",
+            if dry_run { "would delete" } else { "deleted" },
+            result.deleted
+        );
+        if !result.deleted_hashes.is_empty() && !dry_run {
+            println!("  deleted objects:");
+            for hash in &result.deleted_hashes {
+                println!("    {hash}");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -464,9 +569,32 @@ mod tests {
     #[test]
     fn cli_parses_restore_with_yes() {
         let cli = Cli::try_parse_from(["varn", "restore", "abc", "--yes"]).unwrap();
-        if let Command::Restore { checkpoint, yes } = cli.command {
+        if let Command::Restore {
+            checkpoint,
+            yes,
+            no_safety,
+        } = cli.command
+        {
             assert_eq!(checkpoint, "abc");
             assert!(yes);
+            assert!(!no_safety);
+        } else {
+            panic!("wrong command");
+        }
+    }
+
+    #[test]
+    fn cli_parses_restore_with_no_safety() {
+        let cli = Cli::try_parse_from(["varn", "restore", "abc", "--yes", "--no-safety"]).unwrap();
+        if let Command::Restore {
+            checkpoint,
+            yes,
+            no_safety,
+        } = cli.command
+        {
+            assert_eq!(checkpoint, "abc");
+            assert!(yes);
+            assert!(no_safety);
         } else {
             panic!("wrong command");
         }
@@ -477,6 +605,26 @@ mod tests {
         let cli = Cli::try_parse_from(["varn", "--json", "list"]).unwrap();
         assert!(cli.json);
         assert!(matches!(cli.command, Command::List));
+    }
+
+    #[test]
+    fn cli_parses_gc() {
+        let cli = Cli::try_parse_from(["varn", "gc"]).unwrap();
+        if let Command::Gc { dry_run } = cli.command {
+            assert!(!dry_run);
+        } else {
+            panic!("wrong command");
+        }
+    }
+
+    #[test]
+    fn cli_parses_gc_dry_run() {
+        let cli = Cli::try_parse_from(["varn", "gc", "--dry-run"]).unwrap();
+        if let Command::Gc { dry_run } = cli.command {
+            assert!(dry_run);
+        } else {
+            panic!("wrong command");
+        }
     }
 
     #[test]

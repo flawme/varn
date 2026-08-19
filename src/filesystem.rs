@@ -50,6 +50,10 @@ pub struct EntryMeta {
     /// Content hash (SHA-256) for regular files, or `None` for directories,
     /// symlinks, and other entry types.
     pub hash: Option<String>,
+    /// Target path for symlinks (what the link points to), or `None` for
+    /// all other entry types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<PathBuf>,
 }
 
 /// A single entry in a scanned tree, relative to the scan root.
@@ -197,6 +201,22 @@ impl Scanner {
                 None
             };
 
+            // For symlinks, capture the target path so it can be restored.
+            let target = if kind == EntryKind::Symlink {
+                match fs::read_link(&full) {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        warnings.push(ScanWarning {
+                            path: rel.clone(),
+                            message: format!("cannot read symlink target: {e}"),
+                        });
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             entries.push(TreeEntry {
                 path: rel.clone(),
                 meta: EntryMeta {
@@ -205,6 +225,7 @@ impl Scanner {
                     readonly: platform::is_readonly_meta(&meta),
                     mtime: mtime_to_unix(&meta),
                     hash,
+                    target,
                 },
             });
 
@@ -316,6 +337,7 @@ mod tests {
                 hash: Some(
                     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
                 ),
+                target: None,
             },
         };
         let json = serde_json::to_string(&entry).unwrap();
@@ -456,6 +478,11 @@ mod tests {
         let link = find_entry(&result, "link.txt");
         assert_eq!(link.meta.kind, EntryKind::Symlink);
         assert_eq!(link.meta.hash, None, "symlinks should not be hashed");
+        assert_eq!(
+            link.meta.target.as_deref(),
+            Some(tmp.path().join("target.txt").as_path()),
+            "symlink target should be captured"
+        );
     }
 
     #[test]
