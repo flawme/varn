@@ -50,15 +50,24 @@ The `Scanner` recursively walks a directory tree and produces a sorted list of `
 - **Entries are sorted by path** for deterministic output.
 - **Directories and symlinks are not hashed** — only regular file contents are hashed.
 
-### Content-addressed storage (planned)
+### Content-addressed storage
 
-The storage layer is designed toward content-addressed storage:
+File contents are stored as content-addressed blobs in `.varn/objects/`, keyed by their SHA-256 hash:
 
 ```text
-content → hash → content object → snapshot references objects
+content → SHA-256 hash → blob in objects/<2-char shard>/<remaining hex>
 ```
 
-This allows identical file contents to be stored only once (deduplication). The `objects/`, `snapshots/`, and `index/` directories are created during `init` but are not yet populated.
+This allows identical file contents to be stored only once (deduplication). The `ObjectStore` writes blobs atomically (temp file + rename) and skips storage if the blob already exists. Objects are sharded into a two-level directory structure (`ab/cdef...`) to avoid having too many files in a single directory.
+
+### Snapshot persistence
+
+Snapshots are persisted as JSON files in `.varn/snapshots/<checkpoint_id>.json`. Each snapshot contains:
+
+- `CheckpointMeta` — id, description, timestamp, root path
+- A sorted list of `TreeEntry` records — the captured filesystem state
+
+Checkpoint IDs are deterministic: they are the first 12 hex characters of a SHA-256 hash computed from the snapshot's description, timestamp, root path, and all entry paths/metadata/hashes. This means the same filesystem state checkpointed with the same description and timestamp produces the same ID.
 
 ## Error Handling
 
@@ -106,10 +115,9 @@ The `version` field enables future format migrations. The current version is `1`
 
 ## Future Work
 
-1. Content-addressed object storage with deduplication
-2. Snapshot creation and persistence
-3. Full diff engine (metadata, permissions, symlinks)
-4. Safe restore with conflict detection and confirmation
-5. Temporary safety checkpoint before restore
-6. Storage-format migration support
-7. Concurrent scanning for large directory trees
+1. Safe restore with conflict detection and confirmation
+2. Temporary safety checkpoint before restore
+3. Storage-format migration support
+4. Concurrent scanning for large directory trees
+5. Full diff engine (metadata changes, permissions, symlink targets)
+6. Garbage collection of unreferenced objects

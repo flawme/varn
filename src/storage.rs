@@ -124,6 +124,92 @@ impl Repo {
     pub fn exists_at(root: &Path) -> bool {
         root.join(VARN_DIR).exists()
     }
+
+    /// Path to the `objects/` directory inside `.varn/`.
+    pub fn objects_dir(&self) -> PathBuf {
+        self.varn_dir.join("objects")
+    }
+
+    /// Path to the `snapshots/` directory inside `.varn/`.
+    pub fn snapshots_dir(&self) -> PathBuf {
+        self.varn_dir.join("snapshots")
+    }
+
+    /// Get an [`ObjectStore`] backed by this repository's `objects/` directory.
+    pub fn object_store(&self) -> ObjectStore {
+        ObjectStore::new(&self.objects_dir())
+    }
+}
+
+/// Content-addressed object storage.
+///
+/// File contents are stored as blobs keyed by their SHA-256 hash. Objects
+/// are sharded into a two-level directory structure (`ab/cdef...`) to avoid
+/// having too many files in a single directory.
+///
+/// Identical content is stored only once (deduplication): if an object
+/// already exists at the target path, `store_content` is a no-op.
+pub struct ObjectStore {
+    /// The root directory for object storage (`.varn/objects/`).
+    dir: PathBuf,
+}
+
+impl ObjectStore {
+    /// Create a new object store rooted at `dir`.
+    pub fn new(dir: &Path) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+        }
+    }
+
+    /// Store a content blob if it does not already exist.
+    ///
+    /// The blob is written to `<dir>/<first 2 hex chars>/<remaining hex>`
+    /// using an atomic temp-file-then-rename strategy. If the object already
+    /// exists, this is a no-op.
+    pub fn store_content(&self, hash: &str, content: &[u8]) -> Result<()> {
+        let obj_path = self.object_path(hash);
+        if obj_path.exists() {
+            return Ok(());
+        }
+
+        // Ensure the shard directory exists.
+        if let Some(parent) = obj_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // Write to a temp file, then rename for atomicity.
+        let tmp = obj_path.with_extension("tmp");
+        fs::write(&tmp, content)?;
+        fs::rename(&tmp, &obj_path)?;
+        Ok(())
+    }
+
+    /// Check whether an object exists.
+    pub fn exists(&self, hash: &str) -> bool {
+        self.object_path(hash).exists()
+    }
+
+    /// Read an object's content.
+    pub fn read_content(&self, hash: &str) -> Result<Vec<u8>> {
+        let path = self.object_path(hash);
+        if !path.exists() {
+            return Err(VarnError::Other(format!("object not found: {hash}")));
+        }
+        Ok(fs::read(&path)?)
+    }
+
+    /// Compute the on-disk path for a given hash.
+    ///
+    /// Uses a 2-character shard: `ab/cdef1234...`
+    fn object_path(&self, hash: &str) -> PathBuf {
+        let (shard, rest) = if hash.len() >= 2 {
+            hash.split_at(2)
+        } else {
+            (hash, "")
+        };
+        self.dir.join(shard).join(rest)
+    }
 }
 
 /// Search upward from `start` for the first ancestor containing `.varn/`.
@@ -230,5 +316,57 @@ mod tests {
         fs::create_dir_all(&deep).unwrap();
         let found = find_varn_dir(&deep).unwrap();
         assert_eq!(found, root.join(VARN_DIR));
+    }
+
+    #[test]
+    fn object_store_stores_and_reads_content() {
+        let tmp = TempDir::new().unwrap();
+        let store = ObjectStore::new(&tmp.path().join("objects"));
+        let hash = "abcdef1234567890";
+        let content = b"hello world";
+        store.store_content(hash, content).unwrap();
+        assert!(store.exists(hash));
+        let read = store.read_content(hash).unwrap();
+        assert_eq!(read, content);
+    }
+
+    #[test]
+    fn object_store_deduplicates() {
+        let tmp = TempDir::new().unwrap();
+        let store = ObjectStore::new(&tmp.path().join("objects"));
+        let hash = "abcdef1234567890";
+        store.store_content(hash, b"data").unwrap();
+        // Storing again must not error and must not duplicate.
+        store.store_content(hash, b"data").unwrap();
+        assert!(store.exists(hash));
+        assert_eq!(store.read_content(hash).unwrap(), b"data");
+    }
+
+    #[test]
+    fn object_store_shards_by_first_two_chars() {
+        let tmp = TempDir::new().unwrap();
+        let store = ObjectStore::new(&tmp.path().join("objects"));
+        let hash = "abcdef1234567890";
+        store.store_content(hash, b"x").unwrap();
+        // Should be at objects/ab/cdef1234567890
+        let expected = tmp.path().join("objects/ab/cdef1234567890");
+        assert!(expected.exists());
+    }
+
+    #[test]
+    fn object_store_read_missing_fails() {
+        let tmp = TempDir::new().unwrap();
+        let store = ObjectStore::new(&tmp.path().join("objects"));
+        let err = store.read_content("nonexistent").unwrap_err();
+        assert!(matches!(err, VarnError::Other(_)));
+    }
+
+    #[test]
+    fn repo_provides_object_store() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repo::init(tmp.path(), "linux").unwrap();
+        let store = repo.object_store();
+        store.store_content("abcdef", b"data").unwrap();
+        assert!(store.exists("abcdef"));
     }
 }
