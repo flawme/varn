@@ -125,9 +125,32 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                 // Path exists — check if it needs updating.
                 if snap_entry.meta.kind != curr_entry.meta.kind {
                     // Kind changed (e.g., file → directory): conflict.
+                    // We need to delete the current entry and create the
+                    // snapshot's version.
                     conflicts.push(Conflict::Modified {
                         path: (*path).clone(),
                     });
+                    actions.push(RestoreAction::Delete {
+                        path: (*path).clone(),
+                    });
+                    match snap_entry.meta.kind {
+                        EntryKind::File => {
+                            if let Some(ref hash) = snap_entry.meta.hash {
+                                actions.push(RestoreAction::WriteFile {
+                                    path: (*path).clone(),
+                                    hash: hash.clone(),
+                                });
+                            }
+                        }
+                        EntryKind::Directory => {
+                            actions.push(RestoreAction::CreateDir {
+                                path: (*path).clone(),
+                            });
+                        }
+                        EntryKind::Symlink | EntryKind::Other => {
+                            // Symlinks and other types are not restored.
+                        }
+                    }
                 } else if snap_entry.meta.kind == EntryKind::File {
                     // Compare hashes for files.
                     let snap_hash = snap_entry.meta.hash.as_deref().unwrap_or("");
@@ -167,13 +190,32 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
     }
 
     // Sort actions for deterministic execution:
-    // 1. Create directories first (parents before children)
-    // 2. Write files
-    // 3. Delete last (so we don't delete a dir then try to create inside it)
+    // 1. Delete entries that are being replaced (kind changes) — must happen
+    //    before creating the new version at the same path.
+    // 2. Create directories (parents before children)
+    // 3. Write files
+    // 4. Delete unexpected entries (not in snapshot) — last, so we don't
+    //    delete a dir then try to create inside it.
+    //
+    // We distinguish "replace" deletes from "unexpected" deletes by checking
+    // whether the path also has a Create/Write action in the plan.
+    let create_paths: std::collections::HashSet<PathBuf> = actions
+        .iter()
+        .filter_map(|a| match a {
+            RestoreAction::CreateDir { path } | RestoreAction::WriteFile { path, .. } => {
+                Some(path.clone())
+            }
+            _ => None,
+        })
+        .collect();
+
     actions.sort_by_key(|a| match a {
-        RestoreAction::CreateDir { path } => (0, path.clone()),
-        RestoreAction::WriteFile { path, .. } => (1, path.clone()),
-        RestoreAction::Delete { path } => (2, path.clone()),
+        // Replace deletes (same path has a create/write) go first.
+        RestoreAction::Delete { path } if create_paths.contains(path) => (0, path.clone()),
+        RestoreAction::CreateDir { path } => (1, path.clone()),
+        RestoreAction::WriteFile { path, .. } => (2, path.clone()),
+        // Unexpected deletes go last.
+        RestoreAction::Delete { path } => (3, path.clone()),
     });
 
     RestorePlan { actions, conflicts }
@@ -395,6 +437,34 @@ mod tests {
         let plan = plan_restore(&snapshot, &current);
         assert!(plan.has_conflicts());
         assert_eq!(plan.conflicts.len(), 1);
+        // Should have both a delete (old kind) and a write (new kind).
+        assert!(
+            plan.actions
+                .iter()
+                .any(|a| matches!(a, RestoreAction::Delete { .. })),
+            "should delete the old-kind entry"
+        );
+        assert!(
+            plan.actions
+                .iter()
+                .any(|a| matches!(a, RestoreAction::WriteFile { .. })),
+            "should write the snapshot's version"
+        );
+        // Delete must come before the write for the same path.
+        let delete_idx = plan
+            .actions
+            .iter()
+            .position(|a| matches!(a, RestoreAction::Delete { .. }))
+            .unwrap();
+        let write_idx = plan
+            .actions
+            .iter()
+            .position(|a| matches!(a, RestoreAction::WriteFile { .. }))
+            .unwrap();
+        assert!(
+            delete_idx < write_idx,
+            "delete must come before write for kind changes"
+        );
     }
 
     #[test]
