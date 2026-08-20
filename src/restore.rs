@@ -23,6 +23,25 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Validate that a relative path is safe to join to the restore root.
+///
+/// Rejects absolute paths and paths containing `..` components that could
+/// escape the root directory. This prevents path traversal attacks via
+/// malicious snapshot data.
+fn is_safe_relative_path(path: &Path) -> bool {
+    if path.is_absolute() {
+        return false;
+    }
+    for component in path.components() {
+        use std::path::Component;
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    true
+}
+
 /// A conflict detected during restore planning.
 ///
 /// A conflict means the current filesystem state differs from the snapshot
@@ -56,6 +75,8 @@ pub struct RestorePlan {
     pub actions: Vec<RestoreAction>,
     /// Conflicts that require user confirmation.
     pub conflicts: Vec<Conflict>,
+    /// Warnings about entries that cannot be fully restored.
+    pub warnings: Vec<String>,
 }
 
 impl RestorePlan {
@@ -100,6 +121,7 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
 
     let mut actions = Vec::new();
     let mut conflicts = Vec::new();
+    let mut warnings = Vec::new();
 
     // Entries in the snapshot: restore or create.
     for (path, snap_entry) in &snap_map {
@@ -113,6 +135,11 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                                 path: (*path).clone(),
                                 hash: hash.clone(),
                             });
+                        } else {
+                            warnings.push(format!(
+                                "file has no content hash, cannot restore: {}",
+                                path.display()
+                            ));
                         }
                     }
                     EntryKind::Directory => {
@@ -260,7 +287,11 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
         RestoreAction::Delete { path } => (3, path.clone()),
     });
 
-    RestorePlan { actions, conflicts }
+    RestorePlan {
+        actions,
+        conflicts,
+        warnings,
+    }
 }
 
 /// Execute a restore plan against the filesystem.
@@ -283,6 +314,22 @@ pub fn execute_restore(
     let mut symlinks_created = 0;
     let mut deleted = 0;
     let mut warnings = Vec::new();
+
+    // Validate all paths in the plan before touching the filesystem.
+    for action in &plan.actions {
+        let path = match action {
+            RestoreAction::CreateDir { path }
+            | RestoreAction::WriteFile { path, .. }
+            | RestoreAction::CreateSymlink { path, .. }
+            | RestoreAction::Delete { path } => path,
+        };
+        if !is_safe_relative_path(path) {
+            return Err(VarnError::InvalidPath(format!(
+                "unsafe path in restore plan (could escape root): {}",
+                path.display()
+            )));
+        }
+    }
 
     for action in &plan.actions {
         match action {
@@ -452,6 +499,62 @@ mod tests {
                 target: Some(PathBuf::from(target)),
             },
         }
+    }
+
+    #[test]
+    fn is_safe_relative_path_accepts_normal() {
+        assert!(is_safe_relative_path(&PathBuf::from("a.txt")));
+        assert!(is_safe_relative_path(&PathBuf::from("src/main.rs")));
+        assert!(is_safe_relative_path(&PathBuf::from("a/b/c/d.txt")));
+        assert!(is_safe_relative_path(&PathBuf::from("./a.txt")));
+    }
+
+    #[test]
+    fn is_safe_relative_path_rejects_traversal() {
+        assert!(!is_safe_relative_path(&PathBuf::from("../a.txt")));
+        assert!(!is_safe_relative_path(&PathBuf::from("a/../../b.txt")));
+        assert!(!is_safe_relative_path(&PathBuf::from("/etc/passwd")));
+        assert!(!is_safe_relative_path(&PathBuf::from("../")));
+    }
+
+    #[test]
+    fn plan_restore_warns_on_file_without_hash() {
+        let snapshot = vec![TreeEntry {
+            path: PathBuf::from("a.txt"),
+            meta: EntryMeta {
+                kind: EntryKind::File,
+                size: 10,
+                readonly: false,
+                mtime: None,
+                hash: None,
+                target: None,
+            },
+        }];
+        let current = vec![];
+        let plan = plan_restore(&snapshot, &current);
+        assert!(!plan.warnings.is_empty(), "should warn about missing hash");
+        assert!(plan.actions.is_empty(), "should not produce an action");
+    }
+
+    #[test]
+    fn execute_restore_rejects_unsafe_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = crate::storage::Repo::init(tmp.path(), "linux").unwrap();
+        let store = repo.object_store();
+
+        let plan = RestorePlan {
+            actions: vec![RestoreAction::WriteFile {
+                path: PathBuf::from("../../../etc/passwd"),
+                hash: "abcdef123456".to_string(),
+            }],
+            conflicts: vec![],
+            warnings: vec![],
+        };
+
+        let result = execute_restore(&plan, tmp.path(), &store);
+        assert!(result.is_err(), "should reject unsafe path");
+        let err = result.unwrap_err();
+        assert!(matches!(err, VarnError::InvalidPath(_)));
     }
 
     #[test]
@@ -684,6 +787,7 @@ mod tests {
                 target: PathBuf::from("target.txt"),
             }],
             conflicts: vec![],
+            warnings: vec![],
         };
 
         let result = execute_restore(&plan, tmp.path(), &store).unwrap();
@@ -722,6 +826,7 @@ mod tests {
                 },
             ],
             conflicts: vec![],
+            warnings: vec![],
         };
 
         let result = execute_restore(&plan, tmp.path(), &store).unwrap();
@@ -747,6 +852,7 @@ mod tests {
                 target: PathBuf::from("target.txt"),
             }],
             conflicts: vec![],
+            warnings: vec![],
         };
 
         let result = execute_restore(&plan, tmp.path(), &store).unwrap();
@@ -771,6 +877,7 @@ mod tests {
                 hash: hash.to_string(),
             }],
             conflicts: vec![],
+            warnings: vec![],
         };
 
         let result = execute_restore(&plan, tmp.path(), &store).unwrap();
@@ -797,6 +904,7 @@ mod tests {
                 },
             ],
             conflicts: vec![],
+            warnings: vec![],
         };
 
         let result = execute_restore(&plan, tmp.path(), &store).unwrap();
@@ -818,6 +926,7 @@ mod tests {
                 path: PathBuf::from("to_delete.txt"),
             }],
             conflicts: vec![],
+            warnings: vec![],
         };
 
         let result = execute_restore(&plan, tmp.path(), &store).unwrap();
@@ -839,6 +948,7 @@ mod tests {
                 path: PathBuf::from("to_delete"),
             }],
             conflicts: vec![],
+            warnings: vec![],
         };
 
         let result = execute_restore(&plan, tmp.path(), &store).unwrap();
@@ -861,6 +971,7 @@ mod tests {
                 hash: hash.to_string(),
             }],
             conflicts: vec![],
+            warnings: vec![],
         };
 
         let result = execute_restore(&plan, tmp.path(), &store).unwrap();
@@ -879,6 +990,7 @@ mod tests {
                 path: PathBuf::from("nonexistent.txt"),
             }],
             conflicts: vec![],
+            warnings: vec![],
         };
 
         let result = execute_restore(&plan, tmp.path(), &store).unwrap();

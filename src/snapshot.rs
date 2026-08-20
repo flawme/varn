@@ -55,6 +55,9 @@ impl SnapshotData {
 
     /// Check whether a snapshot with the given ID already exists on disk.
     pub fn exists(snapshots_dir: &Path, id: &str) -> bool {
+        if !is_valid_id(id) {
+            return false;
+        }
         snapshots_dir
             .join(format!("{id}.{}", Self::EXTENSION))
             .exists()
@@ -69,6 +72,12 @@ impl SnapshotData {
     /// This makes checkpointing idempotent: the same state checkpointed
     /// twice produces the same ID and does not duplicate or overwrite.
     pub fn save(&self, snapshots_dir: &Path) -> Result<bool> {
+        if !is_valid_id(&self.meta.id.0) {
+            return Err(VarnError::InvalidPath(format!(
+                "invalid checkpoint id: {}",
+                self.meta.id.0
+            )));
+        }
         fs::create_dir_all(snapshots_dir)?;
         let filename = format!("{}.{}", self.meta.id.0, Self::EXTENSION);
         let path = snapshots_dir.join(filename);
@@ -91,6 +100,11 @@ impl SnapshotData {
 
     /// Load a snapshot by its checkpoint ID from a snapshots directory.
     pub fn load_by_id(snapshots_dir: &Path, id: &str) -> Result<Self> {
+        if !is_valid_id(id) {
+            return Err(VarnError::InvalidPath(format!(
+                "invalid checkpoint id: {id}"
+            )));
+        }
         let filename = format!("{id}.{}", Self::EXTENSION);
         let path = snapshots_dir.join(filename);
         if !path.exists() {
@@ -150,6 +164,22 @@ impl SnapshotData {
                 if store.exists(hash) {
                     continue;
                 }
+                // Validate the entry path is safe (no traversal outside root).
+                if entry.path.is_absolute()
+                    || entry.path.components().any(|c| {
+                        matches!(
+                            c,
+                            std::path::Component::ParentDir
+                                | std::path::Component::RootDir
+                                | std::path::Component::Prefix(_)
+                        )
+                    })
+                {
+                    return Err(VarnError::InvalidPath(format!(
+                        "unsafe entry path in snapshot: {}",
+                        entry.path.display()
+                    )));
+                }
                 let full_path = source_root.join(&entry.path);
                 let content = fs::read(&full_path).map_err(|e| {
                     VarnError::Other(format!(
@@ -203,6 +233,15 @@ fn generate_checkpoint_id(meta: &CheckpointMeta, entries: &[TreeEntry]) -> Strin
     }
     let digest = hasher.finalize();
     format!("{:.12x}", digest)
+}
+
+/// Validate that a checkpoint ID is safe to use as a filename.
+///
+/// Checkpoint IDs are generated as lowercase hex strings. This function
+/// rejects IDs that contain path separators, `..`, or other characters
+/// that could escape the snapshots directory.
+fn is_valid_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -366,8 +405,15 @@ mod tests {
     #[test]
     fn snapshot_load_by_id_missing_fails() {
         let tmp = TempDir::new().unwrap();
-        let err = SnapshotData::load_by_id(tmp.path(), "nonexistent").unwrap_err();
+        let err = SnapshotData::load_by_id(tmp.path(), "abcdef123456").unwrap_err();
         assert!(matches!(err, VarnError::Other(_)));
+    }
+
+    #[test]
+    fn snapshot_load_by_id_rejects_invalid_id() {
+        let tmp = TempDir::new().unwrap();
+        let err = SnapshotData::load_by_id(tmp.path(), "nonexistent").unwrap_err();
+        assert!(matches!(err, VarnError::InvalidPath(_)));
     }
 
     #[test]
@@ -521,5 +567,29 @@ mod tests {
         let hashes = data.referenced_hashes();
         assert_eq!(hashes.len(), 1);
         assert!(hashes.contains("same_hash"));
+    }
+
+    #[test]
+    fn is_valid_id_accepts_hex() {
+        assert!(is_valid_id("abcdef123456"));
+        assert!(is_valid_id("ABCDEF"));
+        assert!(is_valid_id("0123456789abcdef"));
+    }
+
+    #[test]
+    fn is_valid_id_rejects_traversal() {
+        assert!(!is_valid_id("../../../etc/passwd"));
+        assert!(!is_valid_id(".."));
+        assert!(!is_valid_id("/etc/passwd"));
+        assert!(!is_valid_id("a/b"));
+        assert!(!is_valid_id(""));
+        assert!(!is_valid_id("hello world"));
+    }
+
+    #[test]
+    fn load_by_id_rejects_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let err = SnapshotData::load_by_id(tmp.path(), "../../../etc/passwd").unwrap_err();
+        assert!(matches!(err, VarnError::InvalidPath(_)));
     }
 }

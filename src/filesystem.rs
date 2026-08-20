@@ -270,7 +270,7 @@ fn mtime_to_unix(meta: &fs::Metadata) -> Option<i64> {
     meta.modified()
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 /// Compute the SHA-256 hash of a byte slice as a hex string.

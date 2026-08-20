@@ -168,7 +168,7 @@ impl ObjectStore {
     /// using an atomic temp-file-then-rename strategy. If the object already
     /// exists, this is a no-op.
     pub fn store_content(&self, hash: &str, content: &[u8]) -> Result<()> {
-        let obj_path = self.object_path(hash);
+        let obj_path = self.object_path(hash)?;
         if obj_path.exists() {
             return Ok(());
         }
@@ -187,12 +187,17 @@ impl ObjectStore {
 
     /// Check whether an object exists.
     pub fn exists(&self, hash: &str) -> bool {
-        self.object_path(hash).exists()
+        // Silently return false for invalid hashes rather than propagating
+        // an error — this is a query, not an operation.
+        match self.object_path(hash) {
+            Ok(path) => path.exists(),
+            Err(_) => false,
+        }
     }
 
     /// Read an object's content.
     pub fn read_content(&self, hash: &str) -> Result<Vec<u8>> {
-        let path = self.object_path(hash);
+        let path = self.object_path(hash)?;
         if !path.exists() {
             return Err(VarnError::Other(format!("object not found: {hash}")));
         }
@@ -245,7 +250,7 @@ impl ObjectStore {
     /// Delete an object by its hash. Returns `true` if an object was deleted,
     /// `false` if it did not exist.
     pub fn delete_object(&self, hash: &str) -> Result<bool> {
-        let path = self.object_path(hash);
+        let path = self.object_path(hash)?;
         match fs::remove_file(&path) {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -256,13 +261,22 @@ impl ObjectStore {
     /// Compute the on-disk path for a given hash.
     ///
     /// Uses a 2-character shard: `ab/cdef1234...`
-    fn object_path(&self, hash: &str) -> PathBuf {
+    ///
+    /// Returns an error if the hash contains characters that could escape
+    /// the objects directory (path traversal). Only lowercase hexadecimal
+    /// characters are accepted.
+    fn object_path(&self, hash: &str) -> Result<PathBuf> {
+        if hash.is_empty() || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(VarnError::InvalidPath(format!(
+                "invalid object hash (must be hex): {hash}"
+            )));
+        }
         let (shard, rest) = if hash.len() >= 2 {
             hash.split_at(2)
         } else {
             (hash, "")
         };
-        self.dir.join(shard).join(rest)
+        Ok(self.dir.join(shard).join(rest))
     }
 }
 
@@ -464,8 +478,16 @@ mod tests {
     fn object_store_read_missing_fails() {
         let tmp = TempDir::new().unwrap();
         let store = ObjectStore::new(&tmp.path().join("objects"));
-        let err = store.read_content("nonexistent").unwrap_err();
+        let err = store.read_content("abcdef123456").unwrap_err();
         assert!(matches!(err, VarnError::Other(_)));
+    }
+
+    #[test]
+    fn object_store_read_invalid_hash_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let store = ObjectStore::new(&tmp.path().join("objects"));
+        let err = store.read_content("nonexistent").unwrap_err();
+        assert!(matches!(err, VarnError::InvalidPath(_)));
     }
 
     #[test]
@@ -504,12 +526,12 @@ mod tests {
     fn list_objects_is_sorted() {
         let tmp = TempDir::new().unwrap();
         let store = ObjectStore::new(&tmp.path().join("objects"));
-        store.store_content("zz1234", b"a").unwrap();
+        store.store_content("ff1234", b"a").unwrap();
         store.store_content("aa1234", b"b").unwrap();
-        store.store_content("mm1234", b"c").unwrap();
+        store.store_content("cc1234", b"c").unwrap();
 
         let objects = store.list_objects().unwrap();
-        assert_eq!(objects, vec!["aa1234", "mm1234", "zz1234"]);
+        assert_eq!(objects, vec!["aa1234", "cc1234", "ff1234"]);
     }
 
     #[test]
@@ -528,7 +550,7 @@ mod tests {
     fn delete_object_missing_returns_false() {
         let tmp = TempDir::new().unwrap();
         let store = ObjectStore::new(&tmp.path().join("objects"));
-        let deleted = store.delete_object("nonexistent").unwrap();
+        let deleted = store.delete_object("abcdef123456").unwrap();
         assert!(!deleted);
     }
 
@@ -615,7 +637,7 @@ mod tests {
         let repo = Repo::init(tmp.path(), "linux").unwrap();
         let store = repo.object_store();
 
-        store.store_content("shared1111", b"shared").unwrap();
+        store.store_content("5abee1112222", b"shared").unwrap();
 
         // Two snapshots both reference the same object.
         let make_snap = |desc: &str, created_at: i64| {
@@ -632,7 +654,7 @@ mod tests {
                     size: 6,
                     readonly: false,
                     mtime: None,
-                    hash: Some("shared1111".to_string()),
+                    hash: Some("5abee1112222".to_string()),
                     target: None,
                 },
             }];
@@ -645,6 +667,33 @@ mod tests {
 
         let result = garbage_collect(&repo, false).unwrap();
         assert_eq!(result.deleted, 0);
-        assert!(store.exists("shared1111"));
+        assert!(store.exists("5abee1112222"));
+    }
+
+    #[test]
+    fn object_store_rejects_path_traversal_hash() {
+        let tmp = TempDir::new().unwrap();
+        let store = ObjectStore::new(&tmp.path().join("objects"));
+
+        // Hash with path traversal characters should be rejected.
+        let err = store
+            .store_content("../../../etc/passwd", b"malicious")
+            .unwrap_err();
+        assert!(matches!(err, VarnError::InvalidPath(_)));
+
+        let err = store.read_content("../../etc/shadow").unwrap_err();
+        assert!(matches!(err, VarnError::InvalidPath(_)));
+
+        let err = store.delete_object("/etc/passwd").unwrap_err();
+        assert!(matches!(err, VarnError::InvalidPath(_)));
+    }
+
+    #[test]
+    fn object_store_exists_returns_false_for_invalid_hash() {
+        let tmp = TempDir::new().unwrap();
+        let store = ObjectStore::new(&tmp.path().join("objects"));
+        // Should not panic — just return false.
+        assert!(!store.exists("../../../etc/passwd"));
+        assert!(!store.exists(""));
     }
 }

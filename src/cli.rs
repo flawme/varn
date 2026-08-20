@@ -369,6 +369,9 @@ fn cmd_restore(checkpoint: &str, yes: bool, no_safety: bool, json: bool) -> Resu
     // Execute the restore.
     let mut result = restore::execute_restore(&plan, &repo.root, &repo.object_store())?;
 
+    // Merge plan warnings into the result.
+    result.warnings.extend(plan.warnings.clone());
+
     // Verify the restore.
     result.verified = restore::verify_restore(&repo.root, &snapshot.entries);
 
@@ -507,6 +510,10 @@ fn absolutize(path: &PathBuf) -> Result<PathBuf> {
 fn format_timestamp(ts: i64) -> String {
     // Simple formatting without external dependencies.
     // Computes UTC date/time without a timezone library.
+    if ts < 0 {
+        // Pre-epoch timestamps are unlikely in practice; clamp to epoch.
+        return "1970-01-01 00:00".to_string();
+    }
     let secs = ts as u64;
     let days_since_epoch = secs / 86400;
     let time_of_day = secs % 86400;
@@ -658,5 +665,17 @@ mod tests {
         // 2026-08-19 is day 20684 since epoch.
         let (y, m, d) = days_to_date(20684);
         assert_eq!((y, m, d), (2026, 8, 19));
+    }
+
+    #[test]
+    fn format_timestamp_negative_clamps_to_epoch() {
+        let formatted = format_timestamp(-1);
+        assert_eq!(formatted, "1970-01-01 00:00");
+    }
+
+    #[test]
+    fn format_timestamp_zero_is_epoch() {
+        let formatted = format_timestamp(0);
+        assert_eq!(formatted, "1970-01-01 00:00");
     }
 }
