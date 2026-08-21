@@ -1,9 +1,10 @@
-//! CLI layer: argument parsing, output formatting, and exit codes.
+//! CLI command handlers.
 //!
-//! The CLI is designed so that another program can reliably consume its
-//! output. When `--json` is passed, commands emit structured JSON to stdout
-//! and errors are emitted as JSON to stderr.
+//! Each function implements one subcommand: `init`, `checkpoint`, `list`,
+//! `diff`, `restore`, `gc`. Both human-readable and `--json` output paths
+//! are implemented in each handler.
 
+use crate::cli::format::{absolutize, format_timestamp, now_unix};
 use crate::core::CheckpointMeta;
 use crate::error::{Result, VarnError};
 use crate::filesystem::Scanner;
@@ -11,84 +12,11 @@ use crate::platform;
 use crate::restore;
 use crate::snapshot::SnapshotData;
 use crate::storage::Repo;
-use clap::{Parser, Subcommand};
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-/// Varn — local state checkpointing and rollback.
-#[derive(Parser, Debug)]
-#[command(name = "varn", version, about, long_about = None)]
-pub struct Cli {
-    /// Emit machine-readable JSON output.
-    #[arg(long, global = true)]
-    pub json: bool,
-
-    #[command(subcommand)]
-    pub command: Command,
-}
-
-/// Top-level commands.
-#[derive(Subcommand, Debug)]
-pub enum Command {
-    /// Initialize Varn metadata for a directory.
-    Init {
-        /// The directory to initialize. Defaults to the current directory.
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-    /// Capture the current filesystem state.
-    Checkpoint {
-        /// A human-readable description of this checkpoint.
-        description: String,
-    },
-    /// Display available checkpoints.
-    List,
-    /// Compare the current state with a checkpoint.
-    Diff {
-        /// The checkpoint to compare against (id or prefix).
-        checkpoint: String,
-    },
-    /// Restore a checkpoint.
-    Restore {
-        /// The checkpoint to restore (id or prefix).
-        checkpoint: String,
-        /// Skip confirmation prompts (use with care).
-        #[arg(long)]
-        yes: bool,
-        /// Skip creating a safety checkpoint before restore.
-        ///
-        /// By default, Varn creates a checkpoint of the current state
-        /// before restoring, so a failed restore can be undone. Use this
-        /// flag to skip that safety measure.
-        #[arg(long)]
-        no_safety: bool,
-    },
-    /// Remove objects from the store that no snapshot references.
-    Gc {
-        /// Show what would be deleted without actually deleting.
-        #[arg(long)]
-        dry_run: bool,
-    },
-}
-
-/// Run a parsed CLI invocation.
-pub fn run(cli: Cli) -> Result<()> {
-    match cli.command {
-        Command::Init { path } => cmd_init(&path, cli.json),
-        Command::Checkpoint { description } => cmd_checkpoint(&description, cli.json),
-        Command::List => cmd_list(cli.json),
-        Command::Diff { checkpoint } => cmd_diff(&checkpoint, cli.json),
-        Command::Restore {
-            checkpoint,
-            yes,
-            no_safety,
-        } => cmd_restore(&checkpoint, yes, no_safety, cli.json),
-        Command::Gc { dry_run } => cmd_gc(dry_run, cli.json),
-    }
-}
-
 /// `varn init`
-fn cmd_init(path: &PathBuf, json: bool) -> Result<()> {
+pub fn cmd_init(path: &PathBuf, json: bool) -> Result<()> {
     let abs = absolutize(path)?;
     let repo = Repo::init(&abs, platform::os_name())?;
     if json {
@@ -109,7 +37,7 @@ fn cmd_init(path: &PathBuf, json: bool) -> Result<()> {
 }
 
 /// `varn checkpoint`
-fn cmd_checkpoint(description: &str, json: bool) -> Result<()> {
+pub fn cmd_checkpoint(description: &str, json: bool) -> Result<()> {
     let repo = Repo::open(&PathBuf::from("."))?;
 
     // Scan the filesystem.
@@ -173,7 +101,7 @@ fn cmd_checkpoint(description: &str, json: bool) -> Result<()> {
 }
 
 /// `varn list`
-fn cmd_list(json: bool) -> Result<()> {
+pub fn cmd_list(json: bool) -> Result<()> {
     let repo = Repo::open(&PathBuf::from("."))?;
     let snapshots = SnapshotData::list_all(&repo.snapshots_dir())?;
 
@@ -207,7 +135,7 @@ fn cmd_list(json: bool) -> Result<()> {
 }
 
 /// `varn diff`
-fn cmd_diff(checkpoint: &str, json: bool) -> Result<()> {
+pub fn cmd_diff(checkpoint: &str, json: bool) -> Result<()> {
     let repo = Repo::open(&PathBuf::from("."))?;
 
     // Load the target snapshot.
@@ -275,7 +203,7 @@ fn cmd_diff(checkpoint: &str, json: bool) -> Result<()> {
 }
 
 /// `varn restore`
-fn cmd_restore(checkpoint: &str, yes: bool, no_safety: bool, json: bool) -> Result<()> {
+pub fn cmd_restore(checkpoint: &str, yes: bool, no_safety: bool, json: bool) -> Result<()> {
     let repo = Repo::open(&PathBuf::from("."))?;
 
     // Load the target snapshot.
@@ -426,7 +354,7 @@ fn cmd_restore(checkpoint: &str, yes: bool, no_safety: bool, json: bool) -> Resu
 }
 
 /// `varn gc`
-fn cmd_gc(dry_run: bool, json: bool) -> Result<()> {
+pub fn cmd_gc(dry_run: bool, json: bool) -> Result<()> {
     let repo = Repo::open(&PathBuf::from("."))?;
     let result = crate::storage::garbage_collect(&repo, dry_run)?;
 
@@ -467,7 +395,7 @@ fn cmd_gc(dry_run: bool, json: bool) -> Result<()> {
 ///
 /// If the ID is a prefix that matches exactly one checkpoint, it is
 /// resolved. If it matches multiple, an error is returned.
-fn resolve_checkpoint(repo: &Repo, id_or_prefix: &str) -> Result<SnapshotData> {
+pub fn resolve_checkpoint(repo: &Repo, id_or_prefix: &str) -> Result<SnapshotData> {
     let snapshots = SnapshotData::list_all(&repo.snapshots_dir())?;
 
     // Try exact match first.
@@ -492,190 +420,5 @@ fn resolve_checkpoint(repo: &Repo, id_or_prefix: &str) -> Result<SnapshotData> {
             "ambiguous checkpoint prefix '{id_or_prefix}' matches {} checkpoints",
             matches.len()
         ))),
-    }
-}
-
-/// Resolve a possibly-relative path to an absolute one without following
-/// symlinks in the final component.
-fn absolutize(path: &PathBuf) -> Result<PathBuf> {
-    if path.is_absolute() {
-        return Ok(path.clone());
-    }
-    let cwd = std::env::current_dir()
-        .map_err(|e| VarnError::Other(format!("could not determine current directory: {e}")))?;
-    Ok(cwd.join(path))
-}
-
-/// Format a UNIX timestamp as `YYYY-MM-DD HH:MM` (UTC).
-fn format_timestamp(ts: i64) -> String {
-    // Simple formatting without external dependencies.
-    // Computes UTC date/time without a timezone library.
-    if ts < 0 {
-        // Pre-epoch timestamps are unlikely in practice; clamp to epoch.
-        return "1970-01-01 00:00".to_string();
-    }
-    let secs = ts as u64;
-    let days_since_epoch = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hour = time_of_day / 3600;
-    let minute = (time_of_day % 3600) / 60;
-
-    // Compute date from days since 1970-01-01.
-    let (year, month, day) = days_to_date(days_since_epoch);
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}")
-}
-
-/// Convert days since 1970-01-01 to (year, month, day).
-/// Based on the Howard Hinnant date algorithm.
-fn days_to_date(days: u64) -> (u32, u32, u32) {
-    let z = days as i64 + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let year = if m <= 2 { y + 1 } else { y };
-    (year as u32, m as u32, d as u32)
-}
-
-/// Current time as seconds since the UNIX epoch.
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cli_parses_init() {
-        let cli = Cli::try_parse_from(["varn", "init", "/tmp/foo"]).unwrap();
-        assert!(!cli.json);
-        assert!(matches!(cli.command, Command::Init { .. }));
-        if let Command::Init { path } = cli.command {
-            assert_eq!(path, PathBuf::from("/tmp/foo"));
-        }
-    }
-
-    #[test]
-    fn cli_parses_checkpoint_with_description() {
-        let cli = Cli::try_parse_from(["varn", "checkpoint", "my desc"]).unwrap();
-        if let Command::Checkpoint { description } = cli.command {
-            assert_eq!(description, "my desc");
-        } else {
-            panic!("wrong command");
-        }
-    }
-
-    #[test]
-    fn cli_parses_restore_with_yes() {
-        let cli = Cli::try_parse_from(["varn", "restore", "abc", "--yes"]).unwrap();
-        if let Command::Restore {
-            checkpoint,
-            yes,
-            no_safety,
-        } = cli.command
-        {
-            assert_eq!(checkpoint, "abc");
-            assert!(yes);
-            assert!(!no_safety);
-        } else {
-            panic!("wrong command");
-        }
-    }
-
-    #[test]
-    fn cli_parses_restore_with_no_safety() {
-        let cli = Cli::try_parse_from(["varn", "restore", "abc", "--yes", "--no-safety"]).unwrap();
-        if let Command::Restore {
-            checkpoint,
-            yes,
-            no_safety,
-        } = cli.command
-        {
-            assert_eq!(checkpoint, "abc");
-            assert!(yes);
-            assert!(no_safety);
-        } else {
-            panic!("wrong command");
-        }
-    }
-
-    #[test]
-    fn cli_parses_json_global_flag() {
-        let cli = Cli::try_parse_from(["varn", "--json", "list"]).unwrap();
-        assert!(cli.json);
-        assert!(matches!(cli.command, Command::List));
-    }
-
-    #[test]
-    fn cli_parses_gc() {
-        let cli = Cli::try_parse_from(["varn", "gc"]).unwrap();
-        if let Command::Gc { dry_run } = cli.command {
-            assert!(!dry_run);
-        } else {
-            panic!("wrong command");
-        }
-    }
-
-    #[test]
-    fn cli_parses_gc_dry_run() {
-        let cli = Cli::try_parse_from(["varn", "gc", "--dry-run"]).unwrap();
-        if let Command::Gc { dry_run } = cli.command {
-            assert!(dry_run);
-        } else {
-            panic!("wrong command");
-        }
-    }
-
-    #[test]
-    fn cli_parses_init_default_path() {
-        let cli = Cli::try_parse_from(["varn", "init"]).unwrap();
-        if let Command::Init { path } = cli.command {
-            assert_eq!(path, PathBuf::from("."));
-        } else {
-            panic!("wrong command");
-        }
-    }
-
-    #[test]
-    fn format_timestamp_known_value() {
-        // 2026-08-19 20:14 in UTC (timestamp 1787162040)
-        // Note: this is UTC; local time may differ.
-        let ts = 1787162040;
-        let formatted = format_timestamp(ts);
-        assert!(formatted.starts_with("2026-08-19"));
-    }
-
-    #[test]
-    fn days_to_date_epoch() {
-        // 1970-01-01 is day 0.
-        let (y, m, d) = days_to_date(0);
-        assert_eq!((y, m, d), (1970, 1, 1));
-    }
-
-    #[test]
-    fn days_to_date_known() {
-        // 2026-08-19 is day 20684 since epoch.
-        let (y, m, d) = days_to_date(20684);
-        assert_eq!((y, m, d), (2026, 8, 19));
-    }
-
-    #[test]
-    fn format_timestamp_negative_clamps_to_epoch() {
-        let formatted = format_timestamp(-1);
-        assert_eq!(formatted, "1970-01-01 00:00");
-    }
-
-    #[test]
-    fn format_timestamp_zero_is_epoch() {
-        let formatted = format_timestamp(0);
-        assert_eq!(formatted, "1970-01-01 00:00");
     }
 }

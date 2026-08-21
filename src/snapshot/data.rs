@@ -1,4 +1,4 @@
-//! Snapshot engine: creating checkpoints and representing state.
+//! Snapshot data model and persistence.
 //!
 //! A snapshot is the persisted representation of a filesystem state at a
 //! point in time. It consists of:
@@ -13,9 +13,9 @@
 use crate::core::{CheckpointId, CheckpointMeta};
 use crate::error::{Result, VarnError};
 use crate::filesystem::TreeEntry;
+use crate::snapshot::id::{generate_checkpoint_id, is_valid_id};
 use crate::storage::ObjectStore;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 
@@ -205,48 +205,10 @@ impl SnapshotData {
     }
 }
 
-/// Generate a deterministic checkpoint ID from the snapshot content.
-///
-/// The ID is the first 12 hex characters of the SHA-256 hash of the
-/// serialized snapshot data (without the ID field, which is set after).
-fn generate_checkpoint_id(meta: &CheckpointMeta, entries: &[TreeEntry]) -> String {
-    let mut hasher = Sha256::new();
-    // Hash the description, timestamp, and root for uniqueness.
-    hasher.update(meta.description.as_bytes());
-    hasher.update(meta.created_at.to_le_bytes());
-    hasher.update(meta.root.to_string_lossy().as_bytes());
-    // Hash each entry's path and metadata.
-    for entry in entries {
-        hasher.update(entry.path.to_string_lossy().as_bytes());
-        hasher.update(entry.meta.hash.as_deref().unwrap_or("").as_bytes());
-        hasher.update(entry.meta.size.to_le_bytes());
-        hasher.update(match entry.meta.kind {
-            crate::filesystem::EntryKind::File => b"file",
-            crate::filesystem::EntryKind::Directory => b"dir\0",
-            crate::filesystem::EntryKind::Symlink => b"syml",
-            crate::filesystem::EntryKind::Other => b"othr",
-        });
-        // Include symlink target so different targets produce different IDs.
-        if let Some(ref target) = entry.meta.target {
-            hasher.update(target.to_string_lossy().as_bytes());
-        }
-    }
-    let digest = hasher.finalize();
-    format!("{:.12x}", digest)
-}
-
-/// Validate that a checkpoint ID is safe to use as a filename.
-///
-/// Checkpoint IDs are generated as lowercase hex strings. This function
-/// rejects IDs that contain path separators, `..`, or other characters
-/// that could escape the snapshots directory.
-fn is_valid_id(id: &str) -> bool {
-    !id.is_empty() && id.chars().all(|c| c.is_ascii_hexdigit())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{CheckpointId, CheckpointMeta};
     use crate::filesystem::{EntryKind, EntryMeta};
     use crate::storage::Repo;
     use std::path::PathBuf;
@@ -295,7 +257,6 @@ mod tests {
         let meta = make_meta();
         let entries = vec![make_entry("a.txt", Some("abc123"))];
         let data = SnapshotData::new(meta, entries);
-        // ID should be 12 hex chars.
         assert_eq!(data.meta.id.0.len(), 12);
         assert!(data.meta.id.0.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -374,15 +335,12 @@ mod tests {
         let entries = vec![make_entry("a.txt", Some("abc123"))];
         let data = SnapshotData::new(meta, entries);
 
-        // First save writes the file.
         let saved1 = data.save(&snapshots_dir).unwrap();
         assert!(saved1);
 
-        // Second save with identical content is a no-op.
         let saved2 = data.save(&snapshots_dir).unwrap();
         assert!(!saved2, "duplicate save should report false");
 
-        // Only one snapshot file should exist.
         let list = SnapshotData::list_all(&snapshots_dir).unwrap();
         assert_eq!(list.len(), 1);
     }
@@ -465,9 +423,8 @@ mod tests {
         let repo = Repo::init(root, "linux").unwrap();
         let store = repo.object_store();
 
-        // Create two files with identical content.
-        fs::write(root.join("a.txt"), b"same").unwrap();
-        fs::write(root.join("b.txt"), b"same").unwrap();
+        std::fs::write(root.join("a.txt"), b"same").unwrap();
+        std::fs::write(root.join("b.txt"), b"same").unwrap();
 
         let hash = crate::filesystem::hash_bytes(b"same");
         let entries = vec![
@@ -504,7 +461,6 @@ mod tests {
         let data = SnapshotData::new(meta, entries);
         data.store_content_blobs(root, &store).unwrap();
 
-        // Only one object should exist despite two files.
         assert!(store.exists(&hash));
         assert_eq!(store.read_content(&hash).unwrap(), b"same");
     }
@@ -516,7 +472,7 @@ mod tests {
         let repo = Repo::init(root, "linux").unwrap();
         let store = repo.object_store();
 
-        fs::create_dir_all(root.join("subdir")).unwrap();
+        std::fs::create_dir_all(root.join("subdir")).unwrap();
 
         let entries = vec![TreeEntry {
             path: PathBuf::from("subdir"),
@@ -537,7 +493,6 @@ mod tests {
             root: root.to_path_buf(),
         };
         let data = SnapshotData::new(meta, entries);
-        // Should not error — directories are skipped.
         data.store_content_blobs(root, &store).unwrap();
     }
 
@@ -567,23 +522,6 @@ mod tests {
         let hashes = data.referenced_hashes();
         assert_eq!(hashes.len(), 1);
         assert!(hashes.contains("same_hash"));
-    }
-
-    #[test]
-    fn is_valid_id_accepts_hex() {
-        assert!(is_valid_id("abcdef123456"));
-        assert!(is_valid_id("ABCDEF"));
-        assert!(is_valid_id("0123456789abcdef"));
-    }
-
-    #[test]
-    fn is_valid_id_rejects_traversal() {
-        assert!(!is_valid_id("../../../etc/passwd"));
-        assert!(!is_valid_id(".."));
-        assert!(!is_valid_id("/etc/passwd"));
-        assert!(!is_valid_id("a/b"));
-        assert!(!is_valid_id(""));
-        assert!(!is_valid_id("hello world"));
     }
 
     #[test]

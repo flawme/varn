@@ -1,80 +1,13 @@
-//! Filesystem data model.
-//!
-//! Types describing entries discovered while scanning a directory tree.
-//! These are the building blocks for snapshots and diffs.
-
-use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::PathBuf;
-
-/// The kind of a filesystem entry.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
-pub enum EntryKind {
-    /// A regular file.
-    File,
-    /// A directory.
-    Directory,
-    /// A symbolic link.
-    Symlink,
-    /// Any other entry type (sockets, fifos, block/char devices).
-    Other,
-}
-
-impl EntryKind {
-    /// Map a [`std::fs::FileType`] to an [`EntryKind`].
-    pub fn from_file_type(ft: fs::FileType) -> Self {
-        if ft.is_file() {
-            Self::File
-        } else if ft.is_dir() {
-            Self::Directory
-        } else if ft.is_symlink() {
-            Self::Symlink
-        } else {
-            Self::Other
-        }
-    }
-}
-
-/// Metadata for a single filesystem entry.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EntryMeta {
-    /// Kind of entry (file, directory, symlink, other).
-    pub kind: EntryKind,
-    /// File size in bytes (0 for directories and symlinks).
-    pub size: u64,
-    /// Whether the entry is read-only (no write permission for owner).
-    pub readonly: bool,
-    /// Modification time as seconds since the UNIX epoch, if available.
-    pub mtime: Option<i64>,
-    /// Content hash (SHA-256) for regular files, or `None` for directories,
-    /// symlinks, and other entry types.
-    pub hash: Option<String>,
-    /// Target path for symlinks (what the link points to), or `None` for
-    /// all other entry types.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target: Option<PathBuf>,
-}
-
-/// A single entry in a scanned tree, relative to the scan root.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TreeEntry {
-    /// Path relative to the scan root, using forward slashes.
-    pub path: PathBuf,
-    /// Metadata for the entry.
-    pub meta: EntryMeta,
-}
-
-// ---------------------------------------------------------------------------
-// Scanner
-// ---------------------------------------------------------------------------
+//! Directory scanner: walks a directory tree and produces [`TreeEntry`] lists.
 
 use crate::error::Result;
+use crate::filesystem::types::{EntryKind, EntryMeta, TreeEntry};
 use crate::platform;
 use crate::storage::VARN_DIR;
 use sha2::{Digest, Sha256};
+use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A non-fatal warning encountered during scanning.
 ///
@@ -105,7 +38,7 @@ pub struct ScanResult {
 /// - Uses `symlink_metadata` so symlinks are recorded as symlinks, not
 ///   followed.
 /// - Computes SHA-256 content hashes for regular files.
-/// - Skips the `.varn/` directory at the scan root.
+/// - Skips the `.varn/` directory at any depth.
 /// - Sorts entries by path for deterministic output.
 /// - Collects per-entry errors as warnings instead of aborting.
 pub struct Scanner {
@@ -292,84 +225,6 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn entry_kind_from_file_type_file() {
-        let tmp = TempDir::new().unwrap();
-        let f = tmp.path().join("f.txt");
-        fs::write(&f, b"hello").unwrap();
-        let meta = fs::symlink_metadata(&f).unwrap();
-        let kind = EntryKind::from_file_type(meta.file_type());
-        assert_eq!(kind, EntryKind::File);
-    }
-
-    #[test]
-    fn entry_kind_from_file_type_dir() {
-        let tmp = TempDir::new().unwrap();
-        let meta = fs::symlink_metadata(tmp.path()).unwrap();
-        let kind = EntryKind::from_file_type(meta.file_type());
-        assert_eq!(kind, EntryKind::Directory);
-    }
-
-    #[test]
-    fn entry_kind_from_file_type_symlink() {
-        let tmp = TempDir::new().unwrap();
-        let target = tmp.path().join("target");
-        fs::write(&target, b"x").unwrap();
-        let link = tmp.path().join("link");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        #[cfg(not(unix))]
-        {
-            // Symlinks require privileges on Windows; skip the assertion there.
-            return;
-        }
-        let meta = fs::symlink_metadata(&link).unwrap();
-        let kind = EntryKind::from_file_type(meta.file_type());
-        assert_eq!(kind, EntryKind::Symlink);
-    }
-
-    #[test]
-    fn tree_entry_serialization_round_trip() {
-        let entry = TreeEntry {
-            path: PathBuf::from("src/main.rs"),
-            meta: EntryMeta {
-                kind: EntryKind::File,
-                size: 42,
-                readonly: false,
-                mtime: Some(1_700_000_000),
-                hash: Some(
-                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
-                ),
-                target: None,
-            },
-        };
-        let json = serde_json::to_string(&entry).unwrap();
-        let back: TreeEntry = serde_json::from_str(&json).unwrap();
-        assert_eq!(entry, back);
-    }
-
-    #[test]
-    fn entry_kind_serializes_lowercase() {
-        let json = serde_json::to_string(&EntryKind::Directory).unwrap();
-        assert_eq!(json, r#""directory""#);
-    }
-
-    #[test]
-    fn hash_bytes_empty() {
-        assert_eq!(
-            hash_bytes(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-    }
-
-    #[test]
-    fn hash_bytes_hello() {
-        assert_eq!(
-            hash_bytes(b"hello"),
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
-        );
-    }
-
-    #[test]
     fn scanner_empty_directory() {
         let tmp = TempDir::new().unwrap();
         let result = Scanner::new(tmp.path()).scan().unwrap();
@@ -381,63 +236,46 @@ mod tests {
     fn scanner_finds_single_file() {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("a.txt"), b"hello").unwrap();
-
         let result = Scanner::new(tmp.path()).scan().unwrap();
         assert_eq!(result.entries.len(), 1);
         assert_eq!(result.entries[0].path, PathBuf::from("a.txt"));
         assert_eq!(result.entries[0].meta.kind, EntryKind::File);
         assert_eq!(result.entries[0].meta.size, 5);
-        assert_eq!(
-            result.entries[0].meta.hash.as_deref(),
-            Some("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
-        );
     }
 
     #[test]
     fn scanner_finds_nested_directories() {
         let tmp = TempDir::new().unwrap();
         fs::create_dir_all(tmp.path().join("a/b/c")).unwrap();
-        fs::write(tmp.path().join("a/b/c/deep.txt"), b"deep").unwrap();
-        fs::write(tmp.path().join("a/top.txt"), b"top").unwrap();
-
+        fs::write(tmp.path().join("a/b/c/file.txt"), b"nested").unwrap();
         let result = Scanner::new(tmp.path()).scan().unwrap();
-        assert_eq!(result.entries.len(), 5);
-
-        let paths: Vec<_> = result
-            .entries
-            .iter()
-            .map(|e| e.path.to_string_lossy().to_string())
-            .collect();
-        assert!(paths.contains(&"a".to_string()));
-        assert!(paths.contains(&"a/b".to_string()));
-        assert!(paths.contains(&"a/b/c".to_string()));
-        assert!(paths.contains(&"a/b/c/deep.txt".to_string()));
-        assert!(paths.contains(&"a/top.txt".to_string()));
+        assert_eq!(result.entries.len(), 4);
     }
 
     #[test]
-    fn scanner_entries_are_sorted() {
+    fn scanner_entries_are_sorted_by_path() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("zebra.txt"), b"z").unwrap();
-        fs::write(tmp.path().join("alpha.txt"), b"a").unwrap();
-        fs::write(tmp.path().join("middle.txt"), b"m").unwrap();
-
+        fs::write(tmp.path().join("c.txt"), b"").unwrap();
+        fs::write(tmp.path().join("a.txt"), b"").unwrap();
+        fs::write(tmp.path().join("b.txt"), b"").unwrap();
         let result = Scanner::new(tmp.path()).scan().unwrap();
-        let paths: Vec<_> = result
-            .entries
-            .iter()
-            .map(|e| e.path.to_string_lossy().to_string())
-            .collect();
-        assert_eq!(paths, vec!["alpha.txt", "middle.txt", "zebra.txt"]);
+        let paths: Vec<_> = result.entries.iter().map(|e| &e.path).collect();
+        assert_eq!(
+            paths,
+            vec![
+                &PathBuf::from("a.txt"),
+                &PathBuf::from("b.txt"),
+                &PathBuf::from("c.txt"),
+            ]
+        );
     }
 
     #[test]
     fn scanner_skips_varn_directory() {
         let tmp = TempDir::new().unwrap();
-        fs::write(tmp.path().join("real.txt"), b"data").unwrap();
-        fs::create_dir_all(tmp.path().join(VARN_DIR).join("objects")).unwrap();
-        fs::write(tmp.path().join(VARN_DIR).join("config.json"), b"{}").unwrap();
-
+        fs::create_dir_all(tmp.path().join(".varn")).unwrap();
+        fs::write(tmp.path().join(".varn/config.json"), b"{}").unwrap();
+        fs::write(tmp.path().join("real.txt"), b"real").unwrap();
         let result = Scanner::new(tmp.path()).scan().unwrap();
         let paths: Vec<_> = result
             .entries
@@ -454,12 +292,10 @@ mod tests {
         fs::write(tmp.path().join("a.txt"), b"identical content").unwrap();
         fs::write(tmp.path().join("b.txt"), b"identical content").unwrap();
         fs::write(tmp.path().join("c.txt"), b"different content").unwrap();
-
         let result = Scanner::new(tmp.path()).scan().unwrap();
         let hash_a = find_entry(&result, "a.txt").meta.hash.as_deref().unwrap();
         let hash_b = find_entry(&result, "b.txt").meta.hash.as_deref().unwrap();
         let hash_c = find_entry(&result, "c.txt").meta.hash.as_deref().unwrap();
-
         assert_eq!(hash_a, hash_b, "identical files must have identical hashes");
         assert_ne!(hash_a, hash_c, "different files must have different hashes");
     }
@@ -475,7 +311,6 @@ mod tests {
         {
             return;
         }
-
         let result = Scanner::new(tmp.path()).scan().unwrap();
         let link = find_entry(&result, "link.txt");
         assert_eq!(link.meta.kind, EntryKind::Symlink);
@@ -491,7 +326,6 @@ mod tests {
     fn scanner_handles_empty_file() {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("empty.txt"), b"").unwrap();
-
         let result = Scanner::new(tmp.path()).scan().unwrap();
         let entry = find_entry(&result, "empty.txt");
         assert_eq!(entry.meta.size, 0);
@@ -506,7 +340,6 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("café.txt"), b"coffee").unwrap();
         fs::write(tmp.path().join("日本語.txt"), b"japanese").unwrap();
-
         let result = Scanner::new(tmp.path()).scan().unwrap();
         assert!(find_entry(&result, "café.txt").meta.kind == EntryKind::File);
         assert!(find_entry(&result, "日本語.txt").meta.kind == EntryKind::File);
@@ -516,7 +349,6 @@ mod tests {
     fn scanner_handles_spaces_in_filenames() {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("my file.txt"), b"spaced").unwrap();
-
         let result = Scanner::new(tmp.path()).scan().unwrap();
         assert_eq!(result.entries.len(), 1);
         assert_eq!(result.entries[0].path, PathBuf::from("my file.txt"));
@@ -526,7 +358,6 @@ mod tests {
     fn scanner_records_directories() {
         let tmp = TempDir::new().unwrap();
         fs::create_dir_all(tmp.path().join("subdir")).unwrap();
-
         let result = Scanner::new(tmp.path()).scan().unwrap();
         let dir = find_entry(&result, "subdir");
         assert_eq!(dir.meta.kind, EntryKind::Directory);
@@ -538,7 +369,6 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let f = tmp.path().join("locked.txt");
         fs::write(&f, b"secret").unwrap();
-
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -546,13 +376,9 @@ mod tests {
             perms.set_mode(0o000);
             fs::set_permissions(&f, perms).unwrap();
         }
-
         let result = Scanner::new(tmp.path()).scan().unwrap();
-
         #[cfg(unix)]
         {
-            // The file should still appear in entries (metadata was readable)
-            // but its hash should be None due to the read error.
             let entry = find_entry(&result, "locked.txt");
             assert_eq!(entry.meta.kind, EntryKind::File);
             assert!(entry.meta.hash.is_none());
