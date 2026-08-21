@@ -59,9 +59,22 @@ pub enum Conflict {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RestoreAction {
     /// Write or overwrite a file with content from the object store.
-    WriteFile { path: PathBuf, hash: String },
+    WriteFile {
+        path: PathBuf,
+        hash: String,
+        /// Whether the file should be read-only after restore.
+        readonly: bool,
+        /// Modification time to restore (unix seconds), if available.
+        mtime: Option<i64>,
+    },
     /// Create a directory.
-    CreateDir { path: PathBuf },
+    CreateDir {
+        path: PathBuf,
+        /// Whether the directory should be read-only after restore.
+        readonly: bool,
+        /// Modification time to restore (unix seconds), if available.
+        mtime: Option<i64>,
+    },
     /// Create a symbolic link pointing to `target`.
     CreateSymlink { path: PathBuf, target: PathBuf },
     /// Delete a file or directory that exists now but not in the checkpoint.
@@ -134,6 +147,8 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                             actions.push(RestoreAction::WriteFile {
                                 path: (*path).clone(),
                                 hash: hash.clone(),
+                                readonly: snap_entry.meta.readonly,
+                                mtime: snap_entry.meta.mtime,
                             });
                         } else {
                             warnings.push(format!(
@@ -145,6 +160,8 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                     EntryKind::Directory => {
                         actions.push(RestoreAction::CreateDir {
                             path: (*path).clone(),
+                            readonly: snap_entry.meta.readonly,
+                            mtime: snap_entry.meta.mtime,
                         });
                     }
                     EntryKind::Symlink => {
@@ -178,12 +195,16 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                                 actions.push(RestoreAction::WriteFile {
                                     path: (*path).clone(),
                                     hash: hash.clone(),
+                                    readonly: snap_entry.meta.readonly,
+                                    mtime: snap_entry.meta.mtime,
                                 });
                             }
                         }
                         EntryKind::Directory => {
                             actions.push(RestoreAction::CreateDir {
                                 path: (*path).clone(),
+                                readonly: snap_entry.meta.readonly,
+                                mtime: snap_entry.meta.mtime,
                             });
                         }
                         EntryKind::Symlink => {
@@ -203,8 +224,8 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                     let snap_hash = snap_entry.meta.hash.as_deref().unwrap_or("");
                     let curr_hash = curr_entry.meta.hash.as_deref().unwrap_or("");
                     if snap_hash != curr_hash {
-                        // File was modified — this is a conflict because
-                        // restoring would overwrite the user's changes.
+                        // File content was modified — this is a conflict
+                        // because restoring would overwrite the user's changes.
                         conflicts.push(Conflict::Modified {
                             path: (*path).clone(),
                         });
@@ -214,10 +235,26 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                             actions.push(RestoreAction::WriteFile {
                                 path: (*path).clone(),
                                 hash: hash.clone(),
+                                readonly: snap_entry.meta.readonly,
+                                mtime: snap_entry.meta.mtime,
+                            });
+                        }
+                    } else if snap_entry.meta.readonly != curr_entry.meta.readonly
+                        || snap_entry.meta.mtime != curr_entry.meta.mtime
+                    {
+                        // Content is the same but metadata (permissions or
+                        // mtime) differs. This is not a conflict — restoring
+                        // metadata does not destroy user data.
+                        if let Some(ref hash) = snap_entry.meta.hash {
+                            actions.push(RestoreAction::WriteFile {
+                                path: (*path).clone(),
+                                hash: hash.clone(),
+                                readonly: snap_entry.meta.readonly,
+                                mtime: snap_entry.meta.mtime,
                             });
                         }
                     }
-                    // If hashes match, no action needed.
+                    // If hashes and metadata match, no action needed.
                 } else if snap_entry.meta.kind == EntryKind::Symlink {
                     // Compare symlink targets.
                     let snap_target = snap_entry.meta.target.as_deref();
@@ -270,7 +307,7 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
     let create_paths: std::collections::HashSet<PathBuf> = actions
         .iter()
         .filter_map(|a| match a {
-            RestoreAction::CreateDir { path }
+            RestoreAction::CreateDir { path, .. }
             | RestoreAction::WriteFile { path, .. }
             | RestoreAction::CreateSymlink { path, .. } => Some(path.clone()),
             _ => None,
@@ -280,7 +317,7 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
     actions.sort_by_key(|a| match a {
         // Replace deletes (same path has a create/write/symlink) go first.
         RestoreAction::Delete { path } if create_paths.contains(path) => (0, path.clone()),
-        RestoreAction::CreateDir { path } => (1, path.clone()),
+        RestoreAction::CreateDir { path, .. } => (1, path.clone()),
         RestoreAction::WriteFile { path, .. } => (2, path.clone()),
         RestoreAction::CreateSymlink { path, .. } => (2, path.clone()),
         // Unexpected deletes go last.
@@ -291,6 +328,57 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
         actions,
         conflicts,
         warnings,
+    }
+}
+
+/// Check that no ancestor of `full` (from `root` up to but not including
+/// the final component) is a symlink. A symlink in the leading path could
+/// cause a write to escape the managed root — the same class of bug as
+/// CVE-2026-71556 (go-git) and GHSA-9qw7-j9xw-fv9c (isomorphic-git).
+fn has_symlink_in_leading_path(root: &Path, full: &Path) -> bool {
+    // Walk from root toward the target, checking each intermediate component.
+    // We skip the final component because the caller handles replacement of
+    // the target separately.
+    let mut current: PathBuf = root.to_path_buf();
+    for component in full.strip_prefix(root).unwrap_or(full).components() {
+        current = current.join(component);
+        // Stop before checking the final component.
+        if current == full {
+            break;
+        }
+        if fs::symlink_metadata(&current)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Apply readonly and mtime metadata to a path after it has been written.
+fn apply_metadata(path: &Path, readonly: bool, mtime: Option<i64>) {
+    if readonly {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = fs::metadata(path) {
+                let mut perms = meta.permissions();
+                perms.set_mode(perms.mode() & !0o200);
+                let _ = fs::set_permissions(path, perms);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if let Ok(meta) = fs::metadata(path) {
+                let mut perms = meta.permissions();
+                perms.set_readonly(true);
+                let _ = fs::set_permissions(path, perms);
+            }
+        }
+    }
+    if let Some(ts) = mtime {
+        let _ = filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(ts, 0));
     }
 }
 
@@ -318,7 +406,7 @@ pub fn execute_restore(
     // Validate all paths in the plan before touching the filesystem.
     for action in &plan.actions {
         let path = match action {
-            RestoreAction::CreateDir { path }
+            RestoreAction::CreateDir { path, .. }
             | RestoreAction::WriteFile { path, .. }
             | RestoreAction::CreateSymlink { path, .. }
             | RestoreAction::Delete { path } => path,
@@ -331,15 +419,54 @@ pub fn execute_restore(
         }
     }
 
+    // Pre-flight check: verify all objects exist before modifying anything.
+    // This prevents partial restores where some files are written and then
+    // a missing object aborts the rest.
+    for action in &plan.actions {
+        if let RestoreAction::WriteFile { path, hash, .. } = action {
+            if !store.exists(hash) {
+                return Err(VarnError::Other(format!(
+                    "missing object for {} (hash {}): cannot restore — no changes were made",
+                    path.display(),
+                    hash
+                )));
+            }
+        }
+    }
+
     for action in &plan.actions {
         match action {
-            RestoreAction::CreateDir { path } => {
+            RestoreAction::CreateDir {
+                path,
+                readonly,
+                mtime,
+            } => {
                 let full = root.join(path);
+                // Check for symlink in leading path to prevent escape.
+                if has_symlink_in_leading_path(root, &full) {
+                    return Err(VarnError::InvalidPath(format!(
+                        "refusing to create directory through a symlink in the path (could escape root): {}",
+                        path.display()
+                    )));
+                }
                 fs::create_dir_all(&full)?;
+                apply_metadata(&full, *readonly, *mtime);
                 dirs_created += 1;
             }
-            RestoreAction::WriteFile { path, hash } => {
+            RestoreAction::WriteFile {
+                path,
+                hash,
+                readonly,
+                mtime,
+            } => {
                 let full = root.join(path);
+                // Check for symlink in leading path to prevent escape.
+                if has_symlink_in_leading_path(root, &full) {
+                    return Err(VarnError::InvalidPath(format!(
+                        "refusing to write file through a symlink in the path (could escape root): {}",
+                        path.display()
+                    )));
+                }
                 // Ensure parent directory exists.
                 if let Some(parent) = full.parent() {
                     fs::create_dir_all(parent)?;
@@ -353,6 +480,7 @@ pub fn execute_restore(
                     ))
                 })?;
                 fs::write(&full, &content)?;
+                apply_metadata(&full, *readonly, *mtime);
                 files_written += 1;
             }
             RestoreAction::CreateSymlink { path, target } => {
@@ -546,6 +674,8 @@ mod tests {
             actions: vec![RestoreAction::WriteFile {
                 path: PathBuf::from("../../../etc/passwd"),
                 hash: "abcdef123456".to_string(),
+                readonly: false,
+                mtime: None,
             }],
             conflicts: vec![],
             warnings: vec![],
@@ -875,6 +1005,8 @@ mod tests {
             actions: vec![RestoreAction::WriteFile {
                 path: PathBuf::from("a.txt"),
                 hash: hash.to_string(),
+                readonly: false,
+                mtime: None,
             }],
             conflicts: vec![],
             warnings: vec![],
@@ -898,9 +1030,13 @@ mod tests {
             actions: vec![
                 RestoreAction::CreateDir {
                     path: PathBuf::from("a"),
+                    readonly: false,
+                    mtime: None,
                 },
                 RestoreAction::CreateDir {
                     path: PathBuf::from("a/b"),
+                    readonly: false,
+                    mtime: None,
                 },
             ],
             conflicts: vec![],
@@ -969,6 +1105,8 @@ mod tests {
             actions: vec![RestoreAction::WriteFile {
                 path: PathBuf::from("a/b/c/file.txt"),
                 hash: hash.to_string(),
+                readonly: false,
+                mtime: None,
             }],
             conflicts: vec![],
             warnings: vec![],

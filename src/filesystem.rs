@@ -164,8 +164,10 @@ impl Scanner {
             let full = entry.path();
             let name = entry.file_name();
 
-            // Skip the .varn directory at the scan root.
-            if dir == self.root && name == std::ffi::OsStr::new(VARN_DIR) {
+            // Skip the .varn directory at any depth, not just the scan root.
+            // This prevents checkpointing nested .varn directories (e.g. from
+            // a subdirectory that was separately initialized).
+            if name == std::ffi::OsStr::new(VARN_DIR) {
                 continue;
             }
 

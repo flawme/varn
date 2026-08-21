@@ -150,9 +150,10 @@ fn scan_skips_varn_directory_at_root() {
 }
 
 #[test]
-fn scan_does_not_skip_varn_in_subdirectory() {
-    // A .varn directory inside a subdirectory should NOT be skipped — only
-    // the one at the scan root is Varn's metadata.
+fn scan_skips_varn_in_subdirectory() {
+    // A .varn directory inside a subdirectory should also be skipped —
+    // a nested .varn could be from a separately initialized sub-repo and
+    // checkpointing/restoring it would corrupt that sub-repo's metadata.
     let tmp = TempDir::new().unwrap();
     fs::create_dir_all(tmp.path().join("project/.varn")).unwrap();
     fs::write(tmp.path().join("project/.varn/data"), b"not varn metadata").unwrap();
@@ -165,8 +166,8 @@ fn scan_does_not_skip_varn_in_subdirectory() {
         .map(|e| e.path.to_string_lossy().to_string())
         .collect();
 
-    assert!(paths.contains(&"project/.varn".to_string()));
-    assert!(paths.contains(&"project/.varn/data".to_string()));
+    assert!(!paths.contains(&"project/.varn".to_string()));
+    assert!(!paths.contains(&"project/.varn/data".to_string()));
     assert!(paths.contains(&"project/main.rs".to_string()));
 }
 
