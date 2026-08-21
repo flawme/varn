@@ -46,7 +46,15 @@ pub fn verify_restore(root: &Path, snapshot: &[TreeEntry]) -> bool {
                 {
                     return false;
                 }
-                // For directories, just kind matching is sufficient.
+                // Compare metadata (readonly, mtime) for all entry types.
+                // This catches a restore that failed to set permissions or
+                // timestamps correctly.
+                if entry.meta.readonly != snap_entry.meta.readonly {
+                    return false;
+                }
+                if entry.meta.mtime != snap_entry.meta.mtime {
+                    return false;
+                }
             }
         }
     }

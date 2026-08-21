@@ -164,6 +164,19 @@ pub fn execute_restore(
                         hash
                     ))
                 })?;
+                // Verify the content hash matches before writing.
+                // This catches corrupted or tampered objects (bit rot, disk
+                // errors, manual tampering) before they overwrite user data.
+                let actual_hash = crate::filesystem::hash_bytes(&content);
+                if actual_hash != *hash {
+                    return Err(VarnError::Other(format!(
+                        "object content hash mismatch for {} (expected {}, got {}): \
+                         object is corrupted — no changes were made to this file",
+                        path.display(),
+                        hash,
+                        actual_hash
+                    )));
+                }
                 fs::write(&full, &content)?;
                 apply_metadata(&full, *readonly, *mtime);
                 files_written += 1;
@@ -255,15 +268,16 @@ mod tests {
         let repo = Repo::init(tmp.path(), "linux").unwrap();
         let store = repo.object_store();
 
-        // Store content in the object store.
-        let hash = "abcdef123456";
-        store.store_content(hash, b"restored content").unwrap();
+        // Store content in the object store with its real hash.
+        let content = b"restored content";
+        let hash = crate::filesystem::hash_bytes(content);
+        store.store_content(&hash, content).unwrap();
 
         // Plan: write a file.
         let plan = RestorePlan {
             actions: vec![RestoreAction::WriteFile {
                 path: PathBuf::from("a.txt"),
-                hash: hash.to_string(),
+                hash,
                 readonly: false,
                 mtime: None,
             }],
@@ -356,13 +370,14 @@ mod tests {
         let repo = Repo::init(tmp.path(), "linux").unwrap();
         let store = repo.object_store();
 
-        let hash = "abcdef123456";
-        store.store_content(hash, b"nested content").unwrap();
+        let content = b"nested content";
+        let hash = crate::filesystem::hash_bytes(content);
+        store.store_content(&hash, content).unwrap();
 
         let plan = RestorePlan {
             actions: vec![RestoreAction::WriteFile {
                 path: PathBuf::from("a/b/c/file.txt"),
-                hash: hash.to_string(),
+                hash,
                 readonly: false,
                 mtime: None,
             }],

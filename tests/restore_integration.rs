@@ -791,3 +791,83 @@ fn restore_restores_mtime() {
         "mtime should be restored to the checkpoint value"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Adversarial tests: round 2 — object integrity and verify_restore gaps
+// ---------------------------------------------------------------------------
+
+/// Corrupted object must NOT silently overwrite user data.
+///
+/// If an object in the store is corrupted (bit rot, disk error, tampering),
+/// the restore engine must detect the hash mismatch BEFORE writing to the
+/// file. The user's data must be preserved.
+#[test]
+fn restore_rejects_corrupted_object_without_overwriting() {
+    let tmp = TempDir::new().unwrap();
+    let repo = Repo::init(tmp.path(), "linux").unwrap();
+
+    write_file(tmp.path(), "file.txt", b"original_content");
+    let snapshot = checkpoint(&repo, "v1");
+
+    // Corrupt the object in the store.
+    let hash = snapshot.entries[0].meta.hash.as_ref().unwrap();
+    let shard = &hash[..2];
+    let rest = &hash[2..];
+    let obj_path = repo.objects_dir().join(shard).join(rest);
+    assert!(obj_path.exists(), "object should exist before corruption");
+    fs::write(&obj_path, b"corrupted_payload").unwrap();
+
+    // Modify the file so restore will try to overwrite it.
+    write_file(tmp.path(), "file.txt", b"user_modified_content");
+
+    // Attempt restore — must fail with a hash mismatch error.
+    let plan = plan_against_current(&repo, &snapshot);
+    let result = restore::execute_restore(&plan, &repo.root, &repo.object_store());
+
+    assert!(
+        result.is_err(),
+        "restore must fail when object content hash doesn't match"
+    );
+
+    // The user's data must NOT have been overwritten.
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("file.txt")).unwrap(),
+        "user_modified_content",
+        "user data must be preserved when restore detects corruption"
+    );
+}
+
+/// verify_restore must check metadata (readonly, mtime), not just content.
+///
+/// If a restore fails to set permissions or timestamps, verify_restore
+/// must report failure, not silently pass.
+#[cfg(unix)]
+#[test]
+fn verify_restore_catches_metadata_mismatch() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let repo = Repo::init(tmp.path(), "linux").unwrap();
+
+    // Create a read-only file.
+    write_file(tmp.path(), "readonly.txt", b"data");
+    let mut perms = fs::metadata(tmp.path().join("readonly.txt"))
+        .unwrap()
+        .permissions();
+    perms.set_mode(0o444);
+    fs::set_permissions(tmp.path().join("readonly.txt"), perms).unwrap();
+
+    let snapshot = checkpoint(&repo, "with readonly");
+
+    // Break permissions (make it writable).
+    let mut perms = fs::metadata(tmp.path().join("readonly.txt"))
+        .unwrap()
+        .permissions();
+    perms.set_mode(0o644);
+    fs::set_permissions(tmp.path().join("readonly.txt"), perms).unwrap();
+
+    // verify_restore should detect the permission mismatch.
+    assert!(
+        !restore::verify_restore(&repo.root, &snapshot.entries),
+        "verify_restore must detect permission mismatch"
+    );
+}
