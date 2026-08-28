@@ -33,6 +33,29 @@ implemented:
   sequentially. No migrations are registered yet (version is still 1), but the
   framework is in place for future format changes.
 
+## Security hardening
+
+The following vulnerabilities were found during an adversarial security review
+of the new features and have been patched:
+
+- **CVE-2026-32232 (ZeptoClaw) R3 — Hard link target symlink bypass**:
+  `CreateHardLink` checked the leading path for symlinks but did not verify
+  that the hard link target itself was not a symlink. An attacker could craft a
+  snapshot where the target is a symlink to an external file, causing
+  `fs::hard_link` to alias an external inode. Fixed by checking the target's
+  metadata and refusing if it is a symlink.
+- **Predictable temp file name in `store_content_streaming`**:
+  The streaming store used a predictable `<hash>.tmp` temp file name. An
+  attacker who could predict the hash could pre-create a symlink at that path
+  pointing to a privileged file. Fixed by suffixing the temp file name with the
+  process ID.
+- **Scan cache poisoning**:
+  The scan cache had no version field, so a future format change would silently
+  use an incompatible cache. Added a `CACHE_VERSION` field; caches with a
+  mismatched version are treated as empty. The trust model is documented: the
+  cache is advisory only and never affects correctness (content is
+  independently hash-verified during storage).
+
 ## Not yet implemented
 
 - **No extended attributes (xattr) capture**
