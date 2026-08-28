@@ -165,10 +165,10 @@ The `version` field enables future format migrations. The current version is `1`
 
 ## Future Work
 
-1. Storage-format migration support
-2. Concurrent scanning for large directory trees
-3. Hard link support
-4. Incremental scanning (only scan what changed since last checkpoint)
-5. Configurable ignore patterns (like .gitignore)
-6. Restore of file ownership (uid/gid) where supported
-7. Content streaming for very large files (avoid reading entire file into memory during store)
+Planned features and known limitations are tracked in a dedicated page:
+
+➡️ **[Future Work](future.md)**
+
+In summary, v0.1.0 does **not** yet support: hard links, incremental scanning,
+ignore patterns, uid/gid restoration, content streaming for large files, or
+storage-format migration. See [`future.md`](future.md) for details.

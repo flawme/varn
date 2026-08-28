@@ -2,7 +2,7 @@
 //!
 //! This module is a placeholder for the full diff engine.
 
-use crate::filesystem::TreeEntry;
+use crate::filesystem::{EntryKind, TreeEntry};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -30,6 +30,11 @@ pub struct Change {
 ///
 /// Entries are matched by path. This is a pure function over pre-collected
 /// entry lists and does not touch the filesystem.
+///
+/// Directory modification times are intentionally excluded from the comparison:
+/// a directory's mtime changes whenever a child is added or removed, so it is
+/// a side-effect of other detected changes rather than an independent content
+/// change. Permission changes on directories are still detected.
 pub fn diff_states(old: &[TreeEntry], new: &[TreeEntry]) -> Vec<Change> {
     let old_map: BTreeMap<&PathBuf, &TreeEntry> = old.iter().map(|e| (&e.path, e)).collect();
     let new_map: BTreeMap<&PathBuf, &TreeEntry> = new.iter().map(|e| (&e.path, e)).collect();
@@ -44,7 +49,7 @@ pub fn diff_states(old: &[TreeEntry], new: &[TreeEntry]) -> Vec<Change> {
                 path: (*path).clone(),
             }),
             Some(old_entry) => {
-                if old_entry != new_entry {
+                if !entries_equal(old_entry, new_entry) {
                     changes.push(Change {
                         kind: ChangeKind::Modified,
                         path: (*path).clone(),
@@ -65,6 +70,29 @@ pub fn diff_states(old: &[TreeEntry], new: &[TreeEntry]) -> Vec<Change> {
     }
 
     changes
+}
+
+/// Compare two entries for diff purposes.
+///
+/// This is like `PartialEq` but excludes the modification time of directories.
+/// A directory's mtime is updated by the OS whenever a child entry is added or
+/// removed, so it reflects other changes already captured by separate entries
+/// rather than an independent modification of the directory itself. Ignoring it
+/// prevents spurious "Modified" reports on parent directories when a file is
+/// added or deleted inside them.
+fn entries_equal(old: &TreeEntry, new: &TreeEntry) -> bool {
+    if old.meta.kind != new.meta.kind {
+        return false;
+    }
+    // For directories, skip mtime comparison.
+    if old.meta.kind == EntryKind::Directory {
+        old.meta.size == new.meta.size
+            && old.meta.readonly == new.meta.readonly
+            && old.meta.hash == new.meta.hash
+            && old.meta.target == new.meta.target
+    } else {
+        old.meta == new.meta
+    }
 }
 
 #[cfg(test)]
@@ -146,5 +174,72 @@ mod tests {
         assert_eq!(kinds[0], ("b".to_string(), ChangeKind::Modified));
         assert_eq!(kinds[1], ("c".to_string(), ChangeKind::Removed));
         assert_eq!(kinds[2], ("d".to_string(), ChangeKind::Added));
+    }
+
+    #[test]
+    fn diff_ignores_directory_mtime_change() {
+        // A directory's mtime changes when a child is added/removed, but that
+        // is a side-effect of other entries — it must not produce a spurious
+        // "Modified" on the directory itself.
+        let dir_old = TreeEntry {
+            path: PathBuf::from("src"),
+            meta: EntryMeta {
+                kind: EntryKind::Directory,
+                size: 0,
+                readonly: false,
+                mtime: Some(1000),
+                hash: None,
+                target: None,
+            },
+        };
+        let dir_new = TreeEntry {
+            path: PathBuf::from("src"),
+            meta: EntryMeta {
+                kind: EntryKind::Directory,
+                size: 0,
+                readonly: false,
+                mtime: Some(2000), // mtime changed
+                hash: None,
+                target: None,
+            },
+        };
+        let file_old = entry("src/main.rs", 1);
+        let file_new = entry("src/main.rs", 1);
+
+        let changes = diff_states(&[dir_old, file_old], &[dir_new, file_new]);
+        assert!(
+            changes.is_empty(),
+            "directory mtime change alone should not be a modification"
+        );
+    }
+
+    #[test]
+    fn diff_detects_directory_permission_change() {
+        // Permission changes on a directory ARE meaningful and must be detected.
+        let dir_old = TreeEntry {
+            path: PathBuf::from("src"),
+            meta: EntryMeta {
+                kind: EntryKind::Directory,
+                size: 0,
+                readonly: false,
+                mtime: Some(1000),
+                hash: None,
+                target: None,
+            },
+        };
+        let dir_new = TreeEntry {
+            path: PathBuf::from("src"),
+            meta: EntryMeta {
+                kind: EntryKind::Directory,
+                size: 0,
+                readonly: true, // permission changed
+                mtime: Some(1000),
+                hash: None,
+                target: None,
+            },
+        };
+        let changes = diff_states(&[dir_old], &[dir_new]);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, ChangeKind::Modified);
     }
 }

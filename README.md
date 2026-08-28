@@ -50,12 +50,20 @@ See the [CLI usage reference](docs/usage.md) for details.
 - `--json` output for AI agent integration
 - Linux, macOS, and Windows support
 
+## Limitations
+
+v0.1.0 is an MVP. Notable things it does **not** yet do: hard link support,
+incremental scanning, ignore patterns, uid/gid restoration, content streaming
+for very large files, and storage-format migration. See
+[Future Work](docs/future.md) for the full list.
+
 ## Documentation
 
 - [Install](docs/install.md) — get Varn running
 - [CLI usage](docs/usage.md) — command reference
 - [Safety model](docs/safety.md) — guarantees and restore pipeline
 - [Architecture](docs/architecture.md) — internals and design decisions
+- [Future work](docs/future.md) — planned features and known limitations
 - [Contributing](CONTRIBUTING.md) — how to contribute
 - [Changelog](CHANGELOG.md) — version history
 
