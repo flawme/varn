@@ -33,6 +33,7 @@ varn list                  Display available checkpoints
 varn diff <checkpoint>     Compare current state with a checkpoint
 varn restore <checkpoint>  Restore a checkpoint
 varn gc                    Remove unreferenced objects from the store
+varn migrate               Migrate storage format to current version
 varn --json <command>      Emit machine-readable JSON output
 ```
 
@@ -42,19 +43,23 @@ See the [CLI usage reference](docs/usage.md) for details.
 
 - Content-addressed storage with SHA-256 hashing and deduplication
 - Symlink scanning and full restoration
-- Permission and mtime restoration
+- Hard link detection and restoration (Unix)
+- Permission, mtime, and uid/gid restoration (Unix)
 - Conflict detection with explicit confirmation
 - Safety checkpoint before restore (undo a bad restore)
 - Idempotent checkpointing (same state = same ID, no duplicates)
+- Incremental scanning with persistent mtime/size cache
+- Content streaming for large files (no full file in memory)
+- Ignore patterns via `.varnignore` (gitignore-style syntax)
+- Storage format migration framework (`varn migrate`)
 - Garbage collection with `--dry-run`
 - `--json` output for AI agent integration
 - Linux, macOS, and Windows support
 
 ## Limitations
 
-v0.1.0 is an MVP. Notable things it does **not** yet do: hard link support,
-incremental scanning, ignore patterns, uid/gid restoration, content streaming
-for very large files, and storage-format migration. See
+No extended attributes (xattr), no ACL restoration, no concurrent scanning,
+no streaming restore, no incremental restore. See
 [Future Work](docs/future.md) for the full list.
 
 ## Documentation

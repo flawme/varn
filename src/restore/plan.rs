@@ -52,6 +52,10 @@ pub enum RestoreAction {
         readonly: bool,
         /// Modification time to restore (unix seconds), if available.
         mtime: Option<i64>,
+        /// User ID to restore (Unix only), if available.
+        uid: Option<u32>,
+        /// Group ID to restore (Unix only), if available.
+        gid: Option<u32>,
     },
     /// Create a directory.
     CreateDir {
@@ -60,9 +64,16 @@ pub enum RestoreAction {
         readonly: bool,
         /// Modification time to restore (unix seconds), if available.
         mtime: Option<i64>,
+        /// User ID to restore (Unix only), if available.
+        uid: Option<u32>,
+        /// Group ID to restore (Unix only), if available.
+        gid: Option<u32>,
     },
     /// Create a symbolic link pointing to `target`.
     CreateSymlink { path: PathBuf, target: PathBuf },
+    /// Create a hard link from `path` to `target` (another file in the
+    /// snapshot). The target must have been restored first.
+    CreateHardLink { path: PathBuf, target: PathBuf },
     /// Delete a file or directory that exists now but not in the checkpoint.
     Delete { path: PathBuf },
 }
@@ -112,12 +123,21 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                 // Path doesn't exist now — need to create it.
                 match snap_entry.meta.kind {
                     EntryKind::File => {
-                        if let Some(ref hash) = snap_entry.meta.hash {
+                        // If this file is a hard link to another file in the
+                        // snapshot, create a hard link instead of writing content.
+                        if let Some(ref link_target) = snap_entry.meta.hardlink_to {
+                            actions.push(RestoreAction::CreateHardLink {
+                                path: (*path).clone(),
+                                target: link_target.clone(),
+                            });
+                        } else if let Some(ref hash) = snap_entry.meta.hash {
                             actions.push(RestoreAction::WriteFile {
                                 path: (*path).clone(),
                                 hash: hash.clone(),
                                 readonly: snap_entry.meta.readonly,
                                 mtime: snap_entry.meta.mtime,
+                                uid: snap_entry.meta.uid,
+                                gid: snap_entry.meta.gid,
                             });
                         } else {
                             warnings.push(format!(
@@ -131,6 +151,8 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                             path: (*path).clone(),
                             readonly: snap_entry.meta.readonly,
                             mtime: snap_entry.meta.mtime,
+                            uid: snap_entry.meta.uid,
+                            gid: snap_entry.meta.gid,
                         });
                     }
                     EntryKind::Symlink => {
@@ -160,12 +182,19 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                     });
                     match snap_entry.meta.kind {
                         EntryKind::File => {
-                            if let Some(ref hash) = snap_entry.meta.hash {
+                            if let Some(ref link_target) = snap_entry.meta.hardlink_to {
+                                actions.push(RestoreAction::CreateHardLink {
+                                    path: (*path).clone(),
+                                    target: link_target.clone(),
+                                });
+                            } else if let Some(ref hash) = snap_entry.meta.hash {
                                 actions.push(RestoreAction::WriteFile {
                                     path: (*path).clone(),
                                     hash: hash.clone(),
                                     readonly: snap_entry.meta.readonly,
                                     mtime: snap_entry.meta.mtime,
+                                    uid: snap_entry.meta.uid,
+                                    gid: snap_entry.meta.gid,
                                 });
                             }
                         }
@@ -174,6 +203,8 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                                 path: (*path).clone(),
                                 readonly: snap_entry.meta.readonly,
                                 mtime: snap_entry.meta.mtime,
+                                uid: snap_entry.meta.uid,
+                                gid: snap_entry.meta.gid,
                             });
                         }
                         EntryKind::Symlink => {
@@ -206,6 +237,8 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                                 hash: hash.clone(),
                                 readonly: snap_entry.meta.readonly,
                                 mtime: snap_entry.meta.mtime,
+                                uid: snap_entry.meta.uid,
+                                gid: snap_entry.meta.gid,
                             });
                         }
                     } else if snap_entry.meta.readonly != curr_entry.meta.readonly
@@ -220,6 +253,8 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                                 hash: hash.clone(),
                                 readonly: snap_entry.meta.readonly,
                                 mtime: snap_entry.meta.mtime,
+                                uid: snap_entry.meta.uid,
+                                gid: snap_entry.meta.gid,
                             });
                         }
                     }
@@ -278,7 +313,8 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
         .filter_map(|a| match a {
             RestoreAction::CreateDir { path, .. }
             | RestoreAction::WriteFile { path, .. }
-            | RestoreAction::CreateSymlink { path, .. } => Some(path.clone()),
+            | RestoreAction::CreateSymlink { path, .. }
+            | RestoreAction::CreateHardLink { path, .. } => Some(path.clone()),
             _ => None,
         })
         .collect();
@@ -289,6 +325,7 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
         RestoreAction::CreateDir { path, .. } => (1, path.clone()),
         RestoreAction::WriteFile { path, .. } => (2, path.clone()),
         RestoreAction::CreateSymlink { path, .. } => (2, path.clone()),
+        RestoreAction::CreateHardLink { path, .. } => (2, path.clone()),
         // Unexpected deletes go last.
         RestoreAction::Delete { path } => (3, path.clone()),
     });
@@ -333,6 +370,10 @@ mod tests {
                 mtime: None,
                 hash: hash.map(String::from),
                 target: None,
+                nlink: 1,
+                hardlink_to: None,
+                uid: None,
+                gid: None,
             },
         }
     }
@@ -347,6 +388,10 @@ mod tests {
                 mtime: None,
                 hash: None,
                 target: None,
+                nlink: 1,
+                hardlink_to: None,
+                uid: None,
+                gid: None,
             },
         }
     }
@@ -361,6 +406,10 @@ mod tests {
                 mtime: None,
                 hash: None,
                 target: Some(PathBuf::from(target)),
+                nlink: 1,
+                hardlink_to: None,
+                uid: None,
+                gid: None,
             },
         }
     }
@@ -392,6 +441,10 @@ mod tests {
                 mtime: None,
                 hash: None,
                 target: None,
+                nlink: 1,
+                hardlink_to: None,
+                uid: None,
+                gid: None,
             },
         }];
         let current = vec![];

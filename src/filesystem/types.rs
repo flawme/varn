@@ -54,6 +54,30 @@ pub struct EntryMeta {
     /// all other entry types.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<PathBuf>,
+    /// Number of hard links to this file. 1 for a normal file with no
+    /// additional hard links. Greater than 1 when other paths point to the
+    /// same inode.
+    #[serde(default = "default_nlink")]
+    pub nlink: u32,
+    /// If this file is a hard link to another file in the snapshot, this
+    /// holds the relative path of the primary (first by sort order) file in
+    /// the hard link group. During restore, a hard link is created to the
+    /// primary instead of writing a separate copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardlink_to: Option<PathBuf>,
+    /// User ID (uid) of the file owner on Unix. `None` on non-Unix platforms
+    /// or if the value could not be determined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    /// Group ID (gid) of the file owner on Unix. `None` on non-Unix platforms
+    /// or if the value could not be determined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gid: Option<u32>,
+}
+
+/// Default value for the `nlink` field (backward-compatible deserialization).
+fn default_nlink() -> u32 {
+    1
 }
 
 /// A single entry in a scanned tree, relative to the scan root.
@@ -117,6 +141,10 @@ mod tests {
                     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string(),
                 ),
                 target: None,
+                nlink: 1,
+                hardlink_to: None,
+                uid: None,
+                gid: None,
             },
         };
         let json = serde_json::to_string(&entry).unwrap();

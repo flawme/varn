@@ -69,6 +69,10 @@ mod tests {
                 mtime: None,
                 hash: hash.map(String::from),
                 target: None,
+                nlink: 1,
+                hardlink_to: None,
+                uid: None,
+                gid: None,
             },
         }
     }

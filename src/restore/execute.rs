@@ -41,8 +41,19 @@ fn has_symlink_in_leading_path(root: &Path, full: &Path) -> bool {
     false
 }
 
-/// Apply readonly and mtime metadata to a path after it has been written.
-fn apply_metadata(path: &Path, readonly: bool, mtime: Option<i64>) {
+/// Apply readonly, mtime, and ownership metadata to a path after it has been
+/// written.
+///
+/// Ownership (uid/gid) is only applied on Unix and only if the process has
+/// permission to do so (root or owner of the file). Failures are silently
+/// ignored — ownership restoration is best-effort, not a hard requirement.
+fn apply_metadata(
+    path: &Path,
+    readonly: bool,
+    mtime: Option<i64>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+) {
     if readonly {
         #[cfg(unix)]
         {
@@ -61,6 +72,20 @@ fn apply_metadata(path: &Path, readonly: bool, mtime: Option<i64>) {
                 let _ = fs::set_permissions(path, perms);
             }
         }
+    }
+    // Restore ownership on Unix. This requires root privileges for changing
+    // to a different user. If it fails, we silently ignore it — ownership
+    // restoration is best-effort.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::chown;
+        if uid.is_some() || gid.is_some() {
+            let _ = chown(path, uid, gid);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (uid, gid);
     }
     if let Some(ts) = mtime {
         let _ = filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(ts, 0));
@@ -94,6 +119,7 @@ pub fn execute_restore(
             RestoreAction::CreateDir { path, .. }
             | RestoreAction::WriteFile { path, .. }
             | RestoreAction::CreateSymlink { path, .. }
+            | RestoreAction::CreateHardLink { path, .. }
             | RestoreAction::Delete { path } => path,
         };
         if !is_safe_relative_path(path) {
@@ -101,6 +127,15 @@ pub fn execute_restore(
                 "unsafe path in restore plan (could escape root): {}",
                 path.display()
             )));
+        }
+        // For hard links, also validate the target path.
+        if let RestoreAction::CreateHardLink { target, .. } = action {
+            if !is_safe_relative_path(target) {
+                return Err(VarnError::InvalidPath(format!(
+                    "unsafe hard link target in restore plan (could escape root): {}",
+                    target.display()
+                )));
+            }
         }
     }
 
@@ -125,6 +160,8 @@ pub fn execute_restore(
                 path,
                 readonly,
                 mtime,
+                uid,
+                gid,
             } => {
                 let full = root.join(path);
                 // Check for symlink in leading path to prevent escape.
@@ -135,7 +172,7 @@ pub fn execute_restore(
                     )));
                 }
                 fs::create_dir_all(&full)?;
-                apply_metadata(&full, *readonly, *mtime);
+                apply_metadata(&full, *readonly, *mtime, *uid, *gid);
                 dirs_created += 1;
             }
             RestoreAction::WriteFile {
@@ -143,6 +180,8 @@ pub fn execute_restore(
                 hash,
                 readonly,
                 mtime,
+                uid,
+                gid,
             } => {
                 let full = root.join(path);
                 // Check for symlink in leading path to prevent escape.
@@ -178,7 +217,7 @@ pub fn execute_restore(
                     )));
                 }
                 fs::write(&full, &content)?;
-                apply_metadata(&full, *readonly, *mtime);
+                apply_metadata(&full, *readonly, *mtime, *uid, *gid);
                 files_written += 1;
             }
             RestoreAction::CreateSymlink { path, target } => {
@@ -199,6 +238,68 @@ pub fn execute_restore(
                 }
                 crate::platform::create_symlink(target, &full)?;
                 symlinks_created += 1;
+            }
+            RestoreAction::CreateHardLink { path, target } => {
+                let full = root.join(path);
+                let target_full = root.join(target);
+                // Check for symlink in leading path to prevent escape.
+                // Same class of bug as CVE-2026-71556 (go-git) and
+                // GHSA-9qw7-j9xw-fv9c (isomorphic-git).
+                if has_symlink_in_leading_path(root, &full) {
+                    return Err(VarnError::InvalidPath(format!(
+                        "refusing to create hard link through a symlink in the path (could escape root): {}",
+                        path.display()
+                    )));
+                }
+                // Also check the target path for symlinks.
+                if has_symlink_in_leading_path(root, &target_full) {
+                    return Err(VarnError::InvalidPath(format!(
+                        "refusing to hard link to a target through a symlink in the path (could escape root): {}",
+                        target.display()
+                    )));
+                }
+                // Check that the target itself is not a symlink. The leading
+                // path check skips the final component, but the target file
+                // could itself be a symlink to an external location.
+                // CVE-2026-32232 (ZeptoClaw) R3: hardlink alias bypass.
+                if let Ok(meta) = fs::symlink_metadata(&target_full) {
+                    if meta.file_type().is_symlink() {
+                        return Err(VarnError::InvalidPath(format!(
+                            "refusing to hard link to a symlink target (could alias external inode): {}",
+                            target.display()
+                        )));
+                    }
+                } else {
+                    return Err(VarnError::Other(format!(
+                        "hard link target does not exist: {}",
+                        target.display()
+                    )));
+                }
+                // Ensure parent directory exists.
+                if let Some(parent) = full.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                // If something already exists at this path, remove it first.
+                if full.exists() || fs::symlink_metadata(&full).is_ok() {
+                    let meta = fs::symlink_metadata(&full)?;
+                    if meta.is_dir() {
+                        fs::remove_dir_all(&full)?;
+                    } else {
+                        fs::remove_file(&full)?;
+                    }
+                }
+                // Create a hard link to the primary file.
+                // The target must have been restored first (sorting ensures
+                // WriteFile actions come before CreateHardLink at the same
+                // priority level, but cross-directory ordering may vary).
+                fs::hard_link(&target_full, &full).map_err(|e| {
+                    VarnError::Other(format!(
+                        "cannot create hard link {} -> {}: {e}",
+                        path.display(),
+                        target.display()
+                    ))
+                })?;
+                files_written += 1;
             }
             RestoreAction::Delete { path } => {
                 let full = root.join(path);
@@ -251,6 +352,8 @@ mod tests {
                 hash: "abcdef123456".to_string(),
                 readonly: false,
                 mtime: None,
+                uid: None,
+                gid: None,
             }],
             conflicts: vec![],
             warnings: vec![],
@@ -280,6 +383,8 @@ mod tests {
                 hash,
                 readonly: false,
                 mtime: None,
+                uid: None,
+                gid: None,
             }],
             conflicts: vec![],
             warnings: vec![],
@@ -305,11 +410,15 @@ mod tests {
                     path: PathBuf::from("a"),
                     readonly: false,
                     mtime: None,
+                    uid: None,
+                    gid: None,
                 },
                 RestoreAction::CreateDir {
                     path: PathBuf::from("a/b"),
                     readonly: false,
                     mtime: None,
+                    uid: None,
+                    gid: None,
                 },
             ],
             conflicts: vec![],
@@ -380,6 +489,8 @@ mod tests {
                 hash,
                 readonly: false,
                 mtime: None,
+                uid: None,
+                gid: None,
             }],
             conflicts: vec![],
             warnings: vec![],
@@ -532,6 +643,130 @@ mod tests {
         assert!(
             crate::restore::verify_restore(tmp.path(), &snapshot),
             "filesystem should match snapshot after restore"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_restore_hard_link_refuses_symlink_in_path() {
+        // CVE-2024-32002 pattern: a symlink in the leading path of a
+        // CreateHardLink action could cause the link target to escape the
+        // managed root. The execute function must refuse this.
+        let tmp = TempDir::new().unwrap();
+        let repo = Repo::init(tmp.path(), "linux").unwrap();
+        let store = repo.object_store();
+
+        // Create a symlink that points outside the root.
+        let outside = TempDir::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("evil")).unwrap();
+
+        let plan = RestorePlan {
+            actions: vec![RestoreAction::CreateHardLink {
+                path: std::path::PathBuf::from("evil/payload.txt"),
+                target: std::path::PathBuf::from("original.txt"),
+            }],
+            conflicts: vec![],
+            warnings: vec![],
+        };
+
+        let err = execute_restore(&plan, tmp.path(), &store).unwrap_err();
+        assert!(matches!(err, VarnError::InvalidPath(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_restore_hard_link_refuses_symlink_in_target() {
+        // The hard link target path must also be checked for symlinks.
+        let tmp = TempDir::new().unwrap();
+        let repo = Repo::init(tmp.path(), "linux").unwrap();
+        let store = repo.object_store();
+
+        // Create a symlink that points outside the root.
+        let outside = TempDir::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("evil_target")).unwrap();
+
+        let plan = RestorePlan {
+            actions: vec![RestoreAction::CreateHardLink {
+                path: std::path::PathBuf::from("safe.txt"),
+                target: std::path::PathBuf::from("evil_target/secret.txt"),
+            }],
+            conflicts: vec![],
+            warnings: vec![],
+        };
+
+        let err = execute_restore(&plan, tmp.path(), &store).unwrap_err();
+        assert!(matches!(err, VarnError::InvalidPath(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_restore_hard_link_creates_link() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repo::init(tmp.path(), "linux").unwrap();
+        let store = repo.object_store();
+
+        // Create the primary file.
+        fs::write(tmp.path().join("original.txt"), b"shared content").unwrap();
+
+        let plan = RestorePlan {
+            actions: vec![RestoreAction::CreateHardLink {
+                path: std::path::PathBuf::from("copy.txt"),
+                target: std::path::PathBuf::from("original.txt"),
+            }],
+            conflicts: vec![],
+            warnings: vec![],
+        };
+
+        let result = execute_restore(&plan, tmp.path(), &store).unwrap();
+        assert_eq!(result.files_written, 1);
+
+        // Verify the hard link was created.
+        let original = tmp.path().join("original.txt");
+        let copy = tmp.path().join("copy.txt");
+        assert!(copy.exists());
+        assert_eq!(fs::read(&copy).unwrap(), b"shared content");
+
+        // Verify they share the same inode (hard link, not copy).
+        use std::os::unix::fs::MetadataExt;
+        let orig_meta = fs::metadata(&original).unwrap();
+        let copy_meta = fs::metadata(&copy).unwrap();
+        assert_eq!(orig_meta.ino(), copy_meta.ino());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_restore_hard_link_refuses_symlink_target() {
+        // CVE-2026-32232 (ZeptoClaw) R3: the hard link target itself could
+        // be a symlink to an external file. We must refuse to create a hard
+        // link to a symlink target because it could alias an external inode.
+        let tmp = TempDir::new().unwrap();
+        let repo = Repo::init(tmp.path(), "linux").unwrap();
+        let store = repo.object_store();
+
+        // Create a file outside the root.
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join("secret"), b"external data").unwrap();
+
+        // Create a symlink inside the root pointing to the external file.
+        std::os::unix::fs::symlink(
+            outside.path().join("secret"),
+            tmp.path().join("link_target"),
+        )
+        .unwrap();
+
+        let plan = RestorePlan {
+            actions: vec![RestoreAction::CreateHardLink {
+                path: std::path::PathBuf::from("copy.txt"),
+                target: std::path::PathBuf::from("link_target"),
+            }],
+            conflicts: vec![],
+            warnings: vec![],
+        };
+
+        let err = execute_restore(&plan, tmp.path(), &store).unwrap_err();
+        assert!(
+            matches!(err, VarnError::InvalidPath(_)),
+            "should refuse to hard link to a symlink target"
         );
     }
 }

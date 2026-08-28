@@ -1,54 +1,70 @@
 # Future Work
 
 This page tracks planned features and known limitations of Varn that are **not**
-in the v0.1.0 release. They are intentionally deferred, not forgotten.
+in the current release. They are intentionally deferred, not forgotten.
 
 Varn prioritizes correctness and safety over feature count. Each item below is
 a candidate for a future release once its design and cross-platform behavior are
 fully understood.
 
+## Recently implemented
+
+The following were previously listed as limitations and have now been
+implemented:
+
+- **Hard link support** — Hard links are detected during scan (via `nlink` and
+  content hash grouping) and restored via `fs::hard_link`. The primary file in
+  each group is written normally; secondary files are hard-linked to it.
+- **Incremental scanning** — A persistent scan cache
+  (`.varn/index/scan_cache.json`) records each file's size, mtime, and hash.
+  Files whose size and mtime haven't changed reuse the cached hash instead of
+  being re-read.
+- **Ignore patterns** — `.varnignore` files with gitignore-style pattern
+  matching (`*`, `**`, `?`, `[abc]`, `!negation`, directory-only, anchored).
+  Loaded automatically by `varn checkpoint` and `varn diff`.
+- **File ownership (uid/gid) restoration** — uid/gid are captured on Unix and
+  restored via `chown` during restore. Best-effort: requires root to change to
+  a different user; failures are silently ignored.
+- **Content streaming** — `store_content_blobs` now streams file content in 64KB
+  chunks instead of reading the entire file into memory. Hash is computed
+  during streaming and verified before the object is committed.
+- **Storage format migration** — A migration framework (`varn migrate`) checks
+  the `version` field in `config.json` and applies registered migrations
+  sequentially. No migrations are registered yet (version is still 1), but the
+  framework is in place for future format changes.
+
 ## Not yet implemented
 
-- **No hard link support yet**
-  Hard links are detected as regular files during a scan, but the link
-  relationship between two paths is not recorded or restored. Restoring a
-  checkpoint that contained hard links will produce independent copies instead
-  of re-creating the links.
+- **No extended attributes (xattr) capture**
+  Extended attributes (ACLs, security labels, custom metadata) are not
+  captured or restored. This is platform-specific and requires careful design.
 
-- **No incremental scanning (full scan every time)**
-  Every `varn checkpoint` walks the entire managed tree from the root. There is
-  no cached file index or mtime-based "what changed since last time" fast path,
-  so large trees are re-scanned in full on each checkpoint.
+- **No ACL (Access Control List) restoration**
+  POSIX ACLs and Windows ACLs are not captured. Only basic permission bits
+  (readonly) and Unix ownership (uid/gid) are restored.
 
-- **No ignore patterns (like `.gitignore`)**
-  Every file and directory under the managed root is captured. There is no
-  mechanism to exclude paths (e.g. `target/`, `node_modules/`, build output)
-  from a checkpoint.
+- **No concurrent scanning**
+  Scanning is single-threaded. Large directory trees are walked sequentially.
+  Concurrent scanning would speed up checkpointing on multi-core systems.
 
-- **No file ownership (uid/gid) restoration**
-  File permissions (mode bits) are captured and restored where supported, but
-  Unix ownership (uid/gid) is not. Restored files keep the uid/gid of the
-  process performing the restore.
+- **No streaming restore**
+  Restore reads entire objects from the object store into memory before
+  writing. Very large files could benefit from streaming during restore.
 
-- **`store_content_blobs` reads entire files into memory**
-  Content is read fully into a `Vec<u8>` before hashing and writing to the
-  object store. There is no streaming path, so very large files are bounded by
-  available memory rather than by disk bandwidth.
-
-- **Storage format migration not implemented**
-  The on-disk format carries a `version` field (currently `1`), but no
-  migration path exists to upgrade an existing `.varn/` store from one version
-  to the next. A future version change will require a migration tool.
+- **No incremental restore**
+  Restore always re-writes all files, even if only a few changed. An
+  incremental restore would only write files that differ from the current
+  state.
 
 ## Planned directions
 
 These are longer-term ideas from the project vision, not committed work:
 
-- Incremental scanning with a persistent file index
-- Configurable ignore patterns
-- Hard link recording and restoration
-- Content streaming for large files
-- Storage-format version migration tooling
-- File ownership (uid/gid) capture and restore where the platform supports it
+- Extended attributes (xattr) capture and restoration
+- ACL restoration (POSIX and Windows)
+- Concurrent scanning for large directory trees
+- Streaming restore for very large files
+- Incremental restore (only write changed files)
 - Protecting the restore operation itself with an automatic safety checkpoint
-- Broader metadata capture (extended attributes, ACLs) where supported
+- Configurable ignore pattern sources (e.g. global ignore file)
+- `.gitignore` integration (optionally respect `.gitignore` patterns)

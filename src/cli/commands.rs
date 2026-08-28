@@ -40,9 +40,17 @@ pub fn cmd_init(path: &PathBuf, json: bool) -> Result<()> {
 pub fn cmd_checkpoint(description: &str, json: bool) -> Result<()> {
     let repo = Repo::open(&PathBuf::from("."))?;
 
+    // Load the scan cache for incremental scanning.
+    let cache_path = repo.varn_dir.join("index").join("scan_cache.json");
+    let cache = crate::filesystem::ScanCache::load(&cache_path);
+
     // Scan the filesystem.
-    let scanner = Scanner::new(&repo.root);
+    let mut scanner = Scanner::with_ignore(&repo.root);
+    scanner.set_cache(cache);
     let scan_result = scanner.scan()?;
+
+    // Save the updated cache for the next scan.
+    scan_result.cache.save(&cache_path)?;
 
     // Build the snapshot data (generates the checkpoint ID).
     let meta = CheckpointMeta {
@@ -142,7 +150,7 @@ pub fn cmd_diff(checkpoint: &str, json: bool) -> Result<()> {
     let snapshot = resolve_checkpoint(&repo, checkpoint)?;
 
     // Scan the current filesystem state.
-    let scanner = Scanner::new(&repo.root);
+    let scanner = Scanner::with_ignore(&repo.root);
     let current = scanner.scan()?;
 
     // Compute the diff.
@@ -210,7 +218,7 @@ pub fn cmd_restore(checkpoint: &str, yes: bool, no_safety: bool, json: bool) -> 
     let snapshot = resolve_checkpoint(&repo, checkpoint)?;
 
     // Scan the current filesystem state.
-    let scanner = Scanner::new(&repo.root);
+    let scanner = Scanner::with_ignore(&repo.root);
     let current = scanner.scan()?;
 
     // Plan the restore.
@@ -386,6 +394,44 @@ pub fn cmd_gc(dry_run: bool, json: bool) -> Result<()> {
             for hash in &result.deleted_hashes {
                 println!("    {hash}");
             }
+        }
+    }
+    Ok(())
+}
+
+/// `varn migrate`
+pub fn cmd_migrate(dry_run: bool, json: bool) -> Result<()> {
+    let repo = Repo::open(&PathBuf::from("."))?;
+
+    let needs = crate::storage::needs_migration(&repo);
+
+    if json {
+        let output = serde_json::json!({
+            "status": if needs { "needs_migration" } else { "ok" },
+            "current_version": repo.config.version,
+            "target_version": crate::storage::STORAGE_VERSION,
+            "needs_migration": needs,
+            "dry_run": dry_run,
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        if needs {
+            println!(
+                "Repository version {} needs migration to version {}",
+                repo.config.version,
+                crate::storage::STORAGE_VERSION
+            );
+            if dry_run {
+                println!("  (dry run — no changes made)");
+            } else {
+                crate::storage::migrate_repo(&repo)?;
+                println!("Migration complete.");
+            }
+        } else {
+            println!(
+                "Repository is already at version {} (current).",
+                repo.config.version
+            );
         }
     }
     Ok(())

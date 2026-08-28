@@ -111,6 +111,10 @@ mod tests {
                 mtime: None,
                 hash: None,
                 target: None,
+                nlink: 1,
+                hardlink_to: None,
+                uid: None,
+                gid: None,
             },
         }
     }
@@ -190,6 +194,10 @@ mod tests {
                 mtime: Some(1000),
                 hash: None,
                 target: None,
+                nlink: 1,
+                hardlink_to: None,
+                uid: None,
+                gid: None,
             },
         };
         let dir_new = TreeEntry {
@@ -201,6 +209,10 @@ mod tests {
                 mtime: Some(2000), // mtime changed
                 hash: None,
                 target: None,
+                nlink: 1,
+                hardlink_to: None,
+                uid: None,
+                gid: None,
             },
         };
         let file_old = entry("src/main.rs", 1);
@@ -225,6 +237,10 @@ mod tests {
                 mtime: Some(1000),
                 hash: None,
                 target: None,
+                nlink: 1,
+                hardlink_to: None,
+                uid: None,
+                gid: None,
             },
         };
         let dir_new = TreeEntry {
@@ -236,6 +252,10 @@ mod tests {
                 mtime: Some(1000),
                 hash: None,
                 target: None,
+                nlink: 1,
+                hardlink_to: None,
+                uid: None,
+                gid: None,
             },
         };
         let changes = diff_states(&[dir_old], &[dir_new]);

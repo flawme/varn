@@ -14,12 +14,15 @@
 //! - [`repo`] — `Repo`, `RepoConfig`, repository discovery
 //! - [`object_store`] — `ObjectStore` for content-addressed blobs
 //! - [`gc`] — garbage collection
+//! - [`migrate`] — storage format migration
 
 pub mod gc;
+pub mod migrate;
 pub mod object_store;
 pub mod repo;
 
 // Re-export the public API.
 pub use gc::{GcResult, garbage_collect};
+pub use migrate::{migrate_repo, needs_migration};
 pub use object_store::ObjectStore;
 pub use repo::{Repo, RepoConfig, STORAGE_VERSION, VARN_DIR, find_varn_dir};

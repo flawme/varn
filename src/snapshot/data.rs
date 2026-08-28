@@ -151,13 +151,13 @@ impl SnapshotData {
 
     /// Store file content blobs into the object store.
     ///
-    /// For each file entry with a hash, the content is read from the source
+    /// For each file entry with a hash, the content is streamed from the source
     /// root and stored in the object store. This enables deduplication and
-    /// restoration.
+    /// restoration. Content is streamed in chunks rather than read entirely
+    /// into memory, making this safe for very large files.
     ///
     /// If the file's content has changed since the scan (its hash no longer
-    /// matches), a warning is emitted and the entry's hash is cleared to
-    /// prevent storing inconsistent data.
+    /// matches), an error is returned to prevent storing inconsistent data.
     pub fn store_content_blobs(&self, source_root: &Path, store: &ObjectStore) -> Result<()> {
         for entry in &self.entries {
             if let Some(ref hash) = entry.meta.hash {
@@ -181,24 +181,23 @@ impl SnapshotData {
                     )));
                 }
                 let full_path = source_root.join(&entry.path);
-                let content = fs::read(&full_path).map_err(|e| {
+                let mut file = fs::File::open(&full_path).map_err(|e| {
                     VarnError::Other(format!(
                         "cannot read file for storage: {}: {e}",
                         full_path.display()
                     ))
                 })?;
-                // Verify the content matches the hash from the scan.
-                // If it doesn't, the file was modified between scan and store.
-                let actual_hash = crate::filesystem::hash_bytes(&content);
-                if actual_hash != *hash {
-                    return Err(VarnError::Other(format!(
-                        "file changed during checkpoint: {} (expected hash {}, got {})",
-                        entry.path.display(),
-                        hash,
-                        actual_hash
-                    )));
-                }
-                store.store_content(hash, &content)?;
+                // Stream the content to the object store. The hash is
+                // verified during streaming — if the file changed since
+                // the scan, the hash won't match and an error is returned.
+                store
+                    .store_content_streaming(hash, &mut file)
+                    .map_err(|e| {
+                        VarnError::Other(format!(
+                            "failed to store content for {}: {e}",
+                            entry.path.display()
+                        ))
+                    })?;
             }
         }
         Ok(())
@@ -233,6 +232,10 @@ mod tests {
                 mtime: None,
                 hash: hash.map(String::from),
                 target: None,
+                nlink: 1,
+                hardlink_to: None,
+                uid: None,
+                gid: None,
             },
         }
     }
@@ -437,6 +440,10 @@ mod tests {
                     mtime: None,
                     hash: Some(hash.clone()),
                     target: None,
+                    nlink: 1,
+                    hardlink_to: None,
+                    uid: None,
+                    gid: None,
                 },
             },
             TreeEntry {
@@ -448,6 +455,10 @@ mod tests {
                     mtime: None,
                     hash: Some(hash.clone()),
                     target: None,
+                    nlink: 1,
+                    hardlink_to: None,
+                    uid: None,
+                    gid: None,
                 },
             },
         ];
@@ -483,6 +494,10 @@ mod tests {
                 mtime: None,
                 hash: None,
                 target: None,
+                nlink: 1,
+                hardlink_to: None,
+                uid: None,
+                gid: None,
             },
         }];
 

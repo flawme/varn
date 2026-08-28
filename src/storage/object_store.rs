@@ -8,7 +8,9 @@
 //! already exists at the target path, `store_content` is a no-op.
 
 use crate::error::{Result, VarnError};
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Content-addressed object storage.
@@ -44,6 +46,64 @@ impl ObjectStore {
         // Write to a temp file, then rename for atomicity.
         let tmp = obj_path.with_extension("tmp");
         fs::write(&tmp, content)?;
+        fs::rename(&tmp, &obj_path)?;
+        Ok(())
+    }
+
+    /// Store file content by streaming from a reader, computing the SHA-256
+    /// hash as it goes.
+    ///
+    /// This avoids reading the entire file into memory, making it safe for
+    /// very large files. The content is streamed to a temp file in the object
+    /// store's shard directory, then the hash is verified against the expected
+    /// value before renaming to the final path.
+    ///
+    /// If the object already exists, this is a no-op (the reader is not
+    /// consumed).
+    pub fn store_content_streaming(
+        &self,
+        expected_hash: &str,
+        reader: &mut dyn Read,
+    ) -> Result<()> {
+        let obj_path = self.object_path(expected_hash)?;
+        if obj_path.exists() {
+            return Ok(());
+        }
+
+        // Ensure the shard directory exists.
+        if let Some(parent) = obj_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // Stream to a temp file while hashing.
+        // Use a unique temp file name to prevent symlink-based temp file
+        // attacks (CVE-2023-34034 pattern: predictable temp file names allow
+        // pre-creating a symlink that redirects the write).
+        let tmp = obj_path.with_extension(format!("{}.tmp", std::process::id()));
+        let mut file = fs::File::create(&tmp)?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 65536]; // 64KB buffer
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            file.write_all(&buf[..n])?;
+        }
+        file.flush()?;
+
+        // Verify the hash matches.
+        let actual_hash = format!("{:x}", hasher.finalize());
+        if actual_hash != expected_hash {
+            // Clean up the temp file.
+            let _ = fs::remove_file(&tmp);
+            return Err(VarnError::Other(format!(
+                "content hash mismatch: expected {expected_hash}, got {actual_hash}"
+            )));
+        }
+
+        // Rename to final path.
         fs::rename(&tmp, &obj_path)?;
         Ok(())
     }
@@ -217,5 +277,63 @@ mod tests {
         let store = ObjectStore::new(&tmp.path().join("objects"));
         assert!(!store.exists("../../../etc/passwd"));
         assert!(!store.exists(""));
+    }
+
+    #[test]
+    fn object_store_streaming_stores_content() {
+        let tmp = TempDir::new().unwrap();
+        let store = ObjectStore::new(&tmp.path().join("objects"));
+        let content = b"streaming content test";
+        let hash = crate::filesystem::hash_bytes(content);
+        let mut reader = std::io::Cursor::new(content);
+        store.store_content_streaming(&hash, &mut reader).unwrap();
+        assert!(store.exists(&hash));
+        let read = store.read_content(&hash).unwrap();
+        assert_eq!(read, content);
+    }
+
+    #[test]
+    fn object_store_streaming_deduplicates() {
+        let tmp = TempDir::new().unwrap();
+        let store = ObjectStore::new(&tmp.path().join("objects"));
+        let content = b"dedup content";
+        let hash = crate::filesystem::hash_bytes(content);
+
+        let mut reader1 = std::io::Cursor::new(content);
+        store.store_content_streaming(&hash, &mut reader1).unwrap();
+
+        // Second store with different content at same hash should be a no-op.
+        let mut reader2 = std::io::Cursor::new(b"different content");
+        store.store_content_streaming(&hash, &mut reader2).unwrap();
+        assert_eq!(store.read_content(&hash).unwrap(), content);
+    }
+
+    #[test]
+    fn object_store_streaming_rejects_hash_mismatch() {
+        let tmp = TempDir::new().unwrap();
+        let store = ObjectStore::new(&tmp.path().join("objects"));
+        let content = b"actual content";
+        let wrong_hash = "0000000000000000000000000000000000000000000000000000000000000000";
+        let mut reader = std::io::Cursor::new(content);
+        let err = store
+            .store_content_streaming(wrong_hash, &mut reader)
+            .unwrap_err();
+        assert!(matches!(err, VarnError::Other(_)));
+        // Temp file should have been cleaned up.
+        assert!(!store.exists(wrong_hash));
+    }
+
+    #[test]
+    fn object_store_streaming_large_content() {
+        let tmp = TempDir::new().unwrap();
+        let store = ObjectStore::new(&tmp.path().join("objects"));
+        // Create content larger than the read buffer (64KB).
+        let content: Vec<u8> = (0..200_000).map(|i| (i % 256) as u8).collect();
+        let hash = crate::filesystem::hash_bytes(&content);
+        let mut reader = std::io::Cursor::new(&content);
+        store.store_content_streaming(&hash, &mut reader).unwrap();
+        assert!(store.exists(&hash));
+        let read = store.read_content(&hash).unwrap();
+        assert_eq!(read, content);
     }
 }

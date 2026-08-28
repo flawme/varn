@@ -94,6 +94,10 @@ mod tests {
                 mtime: None,
                 hash: Some("aaaa1111".to_string()),
                 target: None,
+                nlink: 1,
+                hardlink_to: None,
+                uid: None,
+                gid: None,
             },
         }];
         let snap = SnapshotData::new(meta, entries);
@@ -169,6 +173,10 @@ mod tests {
                     mtime: None,
                     hash: Some("5abee1112222".to_string()),
                     target: None,
+                    nlink: 1,
+                    hardlink_to: None,
+                    uid: None,
+                    gid: None,
                 },
             }];
             let snap = SnapshotData::new(meta, entries);

@@ -13,7 +13,8 @@ pub mod format;
 
 // Re-export command functions and helpers for main.rs.
 pub use commands::{
-    cmd_checkpoint, cmd_diff, cmd_gc, cmd_init, cmd_list, cmd_restore, resolve_checkpoint,
+    cmd_checkpoint, cmd_diff, cmd_gc, cmd_init, cmd_list, cmd_migrate, cmd_restore,
+    resolve_checkpoint,
 };
 pub use format::{absolutize, format_timestamp, now_unix};
 
@@ -71,6 +72,12 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Migrate the storage format to the current version.
+    Migrate {
+        /// Show what would be migrated without actually migrating.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Run a parsed CLI invocation.
@@ -86,6 +93,7 @@ pub fn run(cli: Cli) -> Result<()> {
             no_safety,
         } => cmd_restore(&checkpoint, yes, no_safety, cli.json),
         Command::Gc { dry_run } => cmd_gc(dry_run, cli.json),
+        Command::Migrate { dry_run } => cmd_migrate(dry_run, cli.json),
     }
 }
 
