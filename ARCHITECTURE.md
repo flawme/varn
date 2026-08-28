@@ -8,16 +8,33 @@ Varn is a local state checkpointing and rollback system. This document describes
 
 ```text
 src/
-├── main.rs        Binary entry point
-├── cli.rs         CLI: argument parsing, output formatting, exit codes
-├── core.rs        Domain models: checkpoint identity, snapshot metadata
-├── filesystem.rs  Filesystem data model + scanner: entry types, metadata, recursive scanning with SHA-256 hashing
-├── snapshot.rs    Snapshot engine: creating checkpoints (placeholder)
-├── storage.rs     On-disk layout, repository config, persistence
-├── diff.rs        Diff engine: comparing two states
-├── restore.rs     Restore engine: conflict detection, safe restore (placeholder)
-├── platform.rs    OS-specific abstractions (os_name, is_posix, is_readonly)
-└── error.rs       Unified error types
+├── main.rs              Binary entry point
+├── cli/
+│   ├── mod.rs           CLI struct, argument parsing, command dispatch
+│   ├── commands.rs      Command handlers (init, checkpoint, list, diff, restore, gc)
+│   └── format.rs        Timestamp formatting, path absolutization
+├── core.rs              Domain models: checkpoint identity, snapshot metadata
+├── filesystem/
+│   ├── mod.rs           Module re-exports
+│   ├── types.rs         Entry types (EntryKind, EntryMeta, TreeEntry)
+│   └── scanner.rs       Recursive directory scanner with SHA-256 hashing
+├── snapshot/
+│   ├── mod.rs           Module re-exports
+│   ├── data.rs          SnapshotData: persistence, content blob storage
+│   └── id.rs            Checkpoint ID generation and validation
+├── storage/
+│   ├── mod.rs           Module re-exports
+│   ├── repo.rs          Repo, RepoConfig, repository discovery
+│   ├── object_store.rs  Content-addressed object storage with deduplication
+│   └── gc.rs            Garbage collection
+├── diff.rs              Diff engine: comparing two states
+├── restore/
+│   ├── mod.rs           Module re-exports
+│   ├── plan.rs          Restore plan types and planning logic
+│   ├── execute.rs       Restore execution with safety checks
+│   └── verify.rs        Post-restore verification
+├── platform.rs          OS-specific abstractions (os_name, is_posix, is_readonly, create_symlink)
+└── error.rs             Unified error types
 ```
 
 ## Design Principles
@@ -89,7 +106,18 @@ The restore process follows a strict four-phase safety model:
 1. **Plan** — `plan_restore()` compares the target snapshot with the current filesystem state and produces actions (WriteFile, CreateDir, Delete) and conflicts (Modified, Unexpected).
 2. **Confirm** — if conflicts exist, the user must confirm interactively (or pass `--yes`). In JSON mode, conflicts are reported and the command exits without making changes unless `--yes` is supplied.
 3. **Safety checkpoint** — before executing the restore, Varn creates a checkpoint of the current state. This safety checkpoint is stored alongside regular checkpoints and is identifiable by its `[safety before restore of <id>]` description prefix. If the restore fails or produces unexpected results, the user can restore the safety checkpoint to recover. Use `--no-safety` to skip this.
-4. **Execute + Verify** — `execute_restore()` performs the file operations (WriteFile, CreateDir, CreateSymlink, Delete), then `verify_restore()` re-scans the filesystem and confirms it matches the snapshot, including symlink targets.
+4. **Execute + Verify** — `execute_restore()` performs the file operations (WriteFile, CreateDir, CreateSymlink, Delete), then `verify_restore()` re-scans the filesystem and confirms it matches the snapshot, including symlink targets, permissions, and timestamps.
+
+### Security hardening
+
+The restore engine includes several security measures discovered through adversarial testing:
+
+- **Path traversal prevention**: all restore paths are validated to reject `..` components and absolute paths.
+- **Symlink escape prevention**: before writing a file or creating a directory, the engine checks that no ancestor directory in the target path is a symlink. This prevents the CVE-2026-71556 / GHSA-9qw7-j9xw-fv9c class of attacks where a symlink in the leading path causes a write to escape the managed root.
+- **Pre-flight object check**: before modifying any files, the engine verifies all objects referenced by the plan exist in the store. This prevents partial restores where some files are written and then a missing object aborts the rest.
+- **Object content hash verification**: after reading content from the object store and before writing it to the filesystem, the engine recomputes the SHA-256 hash and compares it to the expected hash. This catches corrupted or tampered objects (bit rot, disk errors) before they overwrite user data.
+- **Metadata restoration**: file permissions (readonly) and modification times are restored alongside content.
+- **Full verification**: `verify_restore()` checks kind, content hash, symlink target, readonly flag, and mtime — not just content.
 
 ## Error Handling
 
@@ -139,5 +167,8 @@ The `version` field enables future format migrations. The current version is `1`
 
 1. Storage-format migration support
 2. Concurrent scanning for large directory trees
-3. Full diff engine (metadata changes, permissions)
-4. Permission/metadata restoration
+3. Hard link support
+4. Incremental scanning (only scan what changed since last checkpoint)
+5. Configurable ignore patterns (like .gitignore)
+6. Restore of file ownership (uid/gid) where supported
+7. Content streaming for very large files (avoid reading entire file into memory during store)
