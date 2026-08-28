@@ -56,6 +56,7 @@ See the [CLI usage reference](docs/usage.md) for details.
 - [CLI usage](docs/usage.md) — command reference
 - [Safety model](docs/safety.md) — guarantees and restore pipeline
 - [Architecture](docs/architecture.md) — internals and design decisions
+- [Contributing](CONTRIBUTING.md) — how to contribute
 - [Changelog](CHANGELOG.md) — version history
 
 ## Development
