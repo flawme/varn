@@ -11,13 +11,15 @@ src/
 ├── main.rs              Binary entry point
 ├── cli/
 │   ├── mod.rs           CLI struct, argument parsing, command dispatch
-│   ├── commands.rs      Command handlers (init, checkpoint, list, diff, restore, gc)
+│   ├── commands.rs      Command handlers (init, checkpoint, list, diff, restore, gc, migrate)
 │   └── format.rs        Timestamp formatting, path absolutization
 ├── core.rs              Domain models: checkpoint identity, snapshot metadata
 ├── filesystem/
 │   ├── mod.rs           Module re-exports
 │   ├── types.rs         Entry types (EntryKind, EntryMeta, TreeEntry)
-│   └── scanner.rs       Recursive directory scanner with SHA-256 hashing
+│   ├── scanner.rs       Recursive directory scanner with SHA-256 hashing
+│   ├── ignore.rs        .varnignore pattern matching (gitignore-style)
+│   └── scan_cache.rs    Incremental scan cache (mtime/size/hash persistence)
 ├── snapshot/
 │   ├── mod.rs           Module re-exports
 │   ├── data.rs          SnapshotData: persistence, content blob storage
@@ -26,7 +28,8 @@ src/
 │   ├── mod.rs           Module re-exports
 │   ├── repo.rs          Repo, RepoConfig, repository discovery
 │   ├── object_store.rs  Content-addressed object storage with deduplication
-│   └── gc.rs            Garbage collection
+│   ├── gc.rs            Garbage collection
+│   └── migrate.rs       Storage format migration framework
 ├── diff.rs              Diff engine: comparing two states
 ├── restore/
 │   ├── mod.rs           Module re-exports
@@ -64,6 +67,10 @@ The `Scanner` recursively walks a directory tree and produces a sorted list of `
 - **SHA-256 content hashing** for regular files enables deduplication and change detection.
 - **Symlink targets are captured** via `read_link` and stored in `EntryMeta.target`. This enables full symlink restoration, including detecting when a symlink's target has changed.
 - **The `.varn/` directory at the scan root is skipped** so Varn's own metadata is never included in a snapshot.
+- **Ignore patterns** from `.varnignore` are applied during scanning. The pattern matcher supports gitignore-style syntax (`*`, `**`, `?`, `[abc]`, `!negation`, directory-only, anchored). Ignored directories are not recursed into.
+- **Incremental scanning**: a persistent cache (`.varn/index/scan_cache.json`) records each file's size, mtime, and hash. Files whose size and mtime haven't changed since the last scan reuse the cached hash instead of being re-read. The cache is advisory — correctness never depends on it.
+- **Hard link detection**: files with `nlink > 1` are grouped by content hash. The first file (by sorted path) in each group is the primary; others get `hardlink_to` set to the primary's path for link-based restoration.
+- **Ownership capture**: on Unix, uid and gid are captured from inode metadata for restoration.
 - **Per-entry errors are collected as `ScanWarning`s** rather than aborting the scan. A single inaccessible file does not prevent scanning the rest of the tree.
 - **Entries are sorted by path** for deterministic output.
 - **Directories and symlinks are not hashed** — only regular file contents are hashed.
@@ -77,6 +84,8 @@ content → SHA-256 hash → blob in objects/<2-char shard>/<remaining hex>
 ```
 
 This allows identical file contents to be stored only once (deduplication). The `ObjectStore` writes blobs atomically (temp file + rename) and skips storage if the blob already exists. Objects are sharded into a two-level directory structure (`ab/cdef...`) to avoid having too many files in a single directory.
+
+Content is streamed in 64KB chunks via `store_content_streaming`, which computes the SHA-256 hash during the write and verifies it before committing the object. This avoids reading entire large files into memory. Temp file names include the process ID to prevent predictable-path symlink attacks.
 
 ### Garbage collection
 
@@ -103,7 +112,7 @@ Checkpoint IDs are deterministic: they are the first 12 hex characters of a SHA-
 
 The restore process follows a strict four-phase safety model:
 
-1. **Plan** — `plan_restore()` compares the target snapshot with the current filesystem state and produces actions (WriteFile, CreateDir, Delete) and conflicts (Modified, Unexpected).
+1. **Plan** — `plan_restore()` compares the target snapshot with the current filesystem state and produces actions (WriteFile, CreateDir, CreateSymlink, CreateHardLink, Delete) and conflicts (Modified, Unexpected).
 2. **Confirm** — if conflicts exist, the user must confirm interactively (or pass `--yes`). In JSON mode, conflicts are reported and the command exits without making changes unless `--yes` is supplied.
 3. **Safety checkpoint** — before executing the restore, Varn creates a checkpoint of the current state. This safety checkpoint is stored alongside regular checkpoints and is identifiable by its `[safety before restore of <id>]` description prefix. If the restore fails or produces unexpected results, the user can restore the safety checkpoint to recover. Use `--no-safety` to skip this.
 4. **Execute + Verify** — `execute_restore()` performs the file operations (WriteFile, CreateDir, CreateSymlink, Delete), then `verify_restore()` re-scans the filesystem and confirms it matches the snapshot, including symlink targets, permissions, and timestamps.
@@ -114,10 +123,13 @@ The restore engine includes several security measures discovered through adversa
 
 - **Path traversal prevention**: all restore paths are validated to reject `..` components and absolute paths.
 - **Symlink escape prevention**: before writing a file or creating a directory, the engine checks that no ancestor directory in the target path is a symlink. This prevents the CVE-2026-71556 / GHSA-9qw7-j9xw-fv9c class of attacks where a symlink in the leading path causes a write to escape the managed root.
+- **Hard link target validation**: `CreateHardLink` actions verify that the target is not a symlink, preventing inode aliasing of external files (CVE-2026-32232 / ZeptoClaw R3).
 - **Pre-flight object check**: before modifying any files, the engine verifies all objects referenced by the plan exist in the store. This prevents partial restores where some files are written and then a missing object aborts the rest.
 - **Object content hash verification**: after reading content from the object store and before writing it to the filesystem, the engine recomputes the SHA-256 hash and compares it to the expected hash. This catches corrupted or tampered objects (bit rot, disk errors) before they overwrite user data.
-- **Metadata restoration**: file permissions (readonly) and modification times are restored alongside content.
+- **Streaming content verification**: `store_content_streaming` computes the hash during the write and verifies it before committing the object. Temp file names include the process ID to prevent predictable-path symlink attacks.
+- **Metadata restoration**: file permissions (readonly), modification times, and Unix ownership (uid/gid) are restored alongside content.
 - **Full verification**: `verify_restore()` checks kind, content hash, symlink target, readonly flag, and mtime — not just content.
+- **Scan cache integrity**: the incremental scan cache carries a version field; caches with a mismatched version are discarded. The cache is advisory only and never affects correctness.
 
 ## Error Handling
 
@@ -155,7 +167,7 @@ The repository config is stored as `config.json`:
 }
 ```
 
-The `version` field enables future format migrations. The current version is `1`.
+The `version` field enables future format migrations. The current version is `1`. The `varn migrate` command checks the version and applies registered migrations sequentially. No migrations are registered yet; the framework is in place for future format changes.
 
 ## Testing
 
@@ -167,8 +179,6 @@ The `version` field enables future format migrations. The current version is `1`
 
 Planned features and known limitations are tracked in a dedicated page:
 
-➡️ **[Future Work](future.md)**
+➡️ **[FUTURE.md](../FUTURE.md)**
 
-In summary, v0.1.0 does **not** yet support: hard links, incremental scanning,
-ignore patterns, uid/gid restoration, content streaming for large files, or
-storage-format migration. See [`future.md`](future.md) for details.
+Current limitations include: no extended attributes (xattr), no ACL restoration, no concurrent scanning, no streaming restore, and no incremental restore. See [`FUTURE.md`](../FUTURE.md) for details.

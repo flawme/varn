@@ -56,5 +56,6 @@ The restore engine includes several security measures discovered through adversa
 - **Symlink escape prevention**: before writing a file or creating a directory, the engine checks that no ancestor directory in the target path is a symlink. This prevents the CVE-2026-71556 / GHSA-9qw7-j9xw-fv9c class of attacks.
 - **Pre-flight object check**: before modifying any files, the engine verifies all objects referenced by the plan exist in the store. This prevents partial restores.
 - **Object content hash verification**: after reading content from the object store and before writing it to the filesystem, the engine recomputes the SHA-256 hash and compares it to the expected hash. This catches corrupted or tampered objects before they overwrite user data.
-- **Metadata restoration**: file permissions (readonly) and modification times are restored alongside content.
+- **Metadata restoration**: file permissions (readonly), modification times, and Unix ownership (uid/gid) are restored alongside content.
 - **Full verification**: `verify_restore()` checks kind, content hash, symlink target, readonly flag, and mtime.
+- **Hard link safety**: `CreateHardLink` actions verify that the target is not a symlink, preventing inode aliasing of external files (CVE-2026-32232 / ZeptoClaw R3). Both the link path and target path are checked for symlink escape.

@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Ignore patterns** — `.varnignore` files with gitignore-style pattern matching (`*`, `**`, `?`, `[abc]`, `!negation`, directory-only, anchored). Loaded automatically by `varn checkpoint` and `varn diff`.
+- **Incremental scanning** — persistent scan cache (`.varn/index/scan_cache.json`) records file size, mtime, and hash. Files whose size and mtime haven't changed reuse the cached hash instead of being re-read.
+- **Hard link support** — hard links detected via `nlink` and content hash grouping. Primary file written normally; secondary files hard-linked to it during restore.
+- **uid/gid restoration** — Unix ownership (uid/gid) captured during scan and restored via `chown` during restore (best-effort, requires root for non-owner changes).
+- **Content streaming** — `store_content_blobs` streams file content in 64KB chunks instead of reading entire files into memory. Hash is computed during streaming and verified before committing.
+- **`varn migrate` command** — storage format migration framework. Checks `version` field in `config.json` and applies registered migrations sequentially.
+
+### Security
+
+- **CVE-2026-32232 (ZeptoClaw) R3** — `CreateHardLink` target symlink bypass. Fixed by checking that the hard link target is not itself a symlink, preventing aliasing of external inodes.
+- **Predictable temp file name** — `store_content_streaming` used a predictable `<hash>.tmp` temp file name. Fixed by suffixing with the process ID to prevent symlink-based temp file attacks.
+- **Scan cache poisoning** — added `CACHE_VERSION` field to the scan cache. Caches with a mismatched version are discarded. The cache is advisory only and never affects correctness.
+
 ## [0.1.0] - 2026-08-28
 
 ### Added

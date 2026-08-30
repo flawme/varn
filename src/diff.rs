@@ -74,20 +74,23 @@ pub fn diff_states(old: &[TreeEntry], new: &[TreeEntry]) -> Vec<Change> {
 
 /// Compare two entries for diff purposes.
 ///
-/// This is like `PartialEq` but excludes the modification time of directories.
-/// A directory's mtime is updated by the OS whenever a child entry is added or
-/// removed, so it reflects other changes already captured by separate entries
-/// rather than an independent modification of the directory itself. Ignoring it
+/// This is like `PartialEq` but excludes the modification time and size of
+/// directories. A directory's mtime is updated by the OS whenever a child entry
+/// is added or removed, so it reflects other changes already captured by
+/// separate entries rather than an independent modification of the directory
+/// itself. The same holds for a directory's reported size: on some platforms
+/// (notably macOS) it grows with the number of child entries, while on others
+/// (Linux) it is a fixed block-aligned constant. Either way it is a side-effect
+/// of child add/remove, not an independent content change. Ignoring both
 /// prevents spurious "Modified" reports on parent directories when a file is
 /// added or deleted inside them.
 fn entries_equal(old: &TreeEntry, new: &TreeEntry) -> bool {
     if old.meta.kind != new.meta.kind {
         return false;
     }
-    // For directories, skip mtime comparison.
+    // For directories, skip mtime and size comparison.
     if old.meta.kind == EntryKind::Directory {
-        old.meta.size == new.meta.size
-            && old.meta.readonly == new.meta.readonly
+        old.meta.readonly == new.meta.readonly
             && old.meta.hash == new.meta.hash
             && old.meta.target == new.meta.target
     } else {
@@ -261,5 +264,51 @@ mod tests {
         let changes = diff_states(&[dir_old], &[dir_new]);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].kind, ChangeKind::Modified);
+    }
+
+    #[test]
+    fn diff_ignores_directory_size_change() {
+        // On some platforms (notably macOS) a directory's reported size grows
+        // as child entries are added. Like mtime, this is a side-effect of
+        // child add/remove and must not produce a spurious "Modified" on the
+        // directory itself.
+        let dir_old = TreeEntry {
+            path: PathBuf::from("src/utils"),
+            meta: EntryMeta {
+                kind: EntryKind::Directory,
+                size: 64,
+                readonly: false,
+                mtime: Some(1000),
+                hash: None,
+                target: None,
+                nlink: 1,
+                hardlink_to: None,
+                uid: None,
+                gid: None,
+            },
+        };
+        let dir_new = TreeEntry {
+            path: PathBuf::from("src/utils"),
+            meta: EntryMeta {
+                kind: EntryKind::Directory,
+                size: 96, // size grew (child added)
+                readonly: false,
+                mtime: Some(2000),
+                hash: None,
+                target: None,
+                nlink: 1,
+                hardlink_to: None,
+                uid: None,
+                gid: None,
+            },
+        };
+        let file_old = entry("src/utils/helper.rs", 1);
+        let file_new = entry("src/utils/helper.rs", 1);
+
+        let changes = diff_states(&[dir_old, file_old], &[dir_new, file_new]);
+        assert!(
+            changes.is_empty(),
+            "directory size change alone should not be a modification"
+        );
     }
 }

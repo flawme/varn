@@ -92,4 +92,4 @@ varn diff <checkpoint-id>
 varn restore <checkpoint-id>
 ```
 
-See the [README](../README.md) for usage or the [architecture docs](architecture.md) for internals.
+See the [README](README.md) for usage or the [architecture docs](docs/architecture.md) for internals.

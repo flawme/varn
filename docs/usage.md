@@ -30,6 +30,8 @@ A checkpoint includes:
 
 File contents are stored in the content-addressed object store with deduplication. Checkpointing the same state twice is a no-op (idempotent).
 
+Incremental scanning: on each checkpoint, Varn loads `.varn/index/scan_cache.json` and reuses cached content hashes for files whose size and mtime haven't changed. The cache is saved after each scan.
+
 ### `varn list`
 
 Display available checkpoints.
@@ -40,7 +42,7 @@ varn list
 
 Output:
 
-```
+```text
 ID             TIME                 DESCRIPTION
 a91f3c2b4d5e   2026-08-19 20:14    before agent task
 b72c1a3e5f7d   2026-08-19 20:27    after agent task
@@ -57,7 +59,7 @@ varn diff a91f3c2b4d5e  # Use a full checkpoint ID
 
 Output:
 
-```
+```text
 ADDED
   src/new_file.rs
 
@@ -97,6 +99,44 @@ varn gc --dry-run   # Preview what would be deleted
 
 Safe to run at any time. Objects referenced by any existing snapshot are always preserved.
 
+### `varn migrate`
+
+Migrate the storage format to the current version.
+
+```bash
+varn migrate             # Run pending migrations
+varn migrate --dry-run   # Check if migration is needed
+```
+
+Reports the current and target storage versions. If the repository is already at the current version, no changes are made. If the repository is at a newer version than the installed Varn supports, an error is returned.
+
+## Ignore patterns
+
+Varn reads `.varnignore` files to exclude paths from checkpoints. The syntax follows gitignore conventions:
+
+```text
+# Comments and blank lines are ignored
+*.log                    # Match by extension (any depth)
+target/                  # Directory-only (trailing slash)
+/build                   # Anchored to root (leading slash)
+**/cache/                # Match at any depth
+!important.log           # Negation (re-include)
+```
+
+Place a `.varnignore` file at the root of your Varn-managed directory. It is loaded automatically by `varn checkpoint` and `varn diff`.
+
+### Pattern syntax
+
+| Pattern | Matches |
+|---------|---------|
+| `*.log` | Any file ending in `.log`, at any depth |
+| `target/` | A directory named `target` (and all its contents) |
+| `/build` | A path named `build` at the root only |
+| `**/cache/` | A directory named `cache` at any depth |
+| `!important.log` | Re-includes a file previously excluded |
+| `file[0-9].txt` | One character from the set `0-9` |
+| `?` | Any single character except `/` |
+
 ## Global flags
 
 ### `--json`
@@ -109,9 +149,95 @@ varn --json list
 varn --json diff a91f
 varn --json restore a91f --yes
 varn --json gc --dry-run
+varn --json migrate --dry-run
 ```
 
 Errors are also emitted as JSON to stderr when `--json` is active, making Varn suitable for consumption by AI agents and automation tools.
+
+### JSON output examples
+
+**`varn --json checkpoint "test"`**
+
+```json
+{
+  "status": "ok",
+  "checkpoint_id": "a91f3c2b4d5e",
+  "description": "test",
+  "created_at": 1787162040,
+  "root": "/project",
+  "entries": 12,
+  "saved": true,
+  "warnings": []
+}
+```
+
+**`varn --json list`**
+
+```json
+{
+  "status": "ok",
+  "checkpoints": [
+    {
+      "id": "a91f3c2b4d5e",
+      "description": "before agent task",
+      "created_at": 1787162040,
+      "entries": 12
+    }
+  ]
+}
+```
+
+**`varn --json diff a91f`**
+
+```json
+{
+  "status": "ok",
+  "checkpoint": "a91f3c2b4d5e",
+  "changes": [
+    { "kind": "added", "path": "src/new_file.rs" },
+    { "kind": "modified", "path": "src/main.rs" },
+    { "kind": "deleted", "path": "old_config.json" }
+  ]
+}
+```
+
+**`varn --json restore a91f --yes`**
+
+```json
+{
+  "status": "ok",
+  "checkpoint": "a91f3c2b4d5e",
+  "safety_checkpoint": "b72c1a3e5f7d",
+  "files_written": 3,
+  "dirs_created": 1,
+  "symlinks_created": 0,
+  "deleted": 2,
+  "verified": true,
+  "warnings": []
+}
+```
+
+**`varn --json gc --dry-run`**
+
+```json
+{
+  "status": "ok",
+  "dry_run": true,
+  "total_objects": 45,
+  "referenced_objects": 30,
+  "deleted": 15,
+  "deleted_hashes": ["aaaa1111", "bbbb2222"]
+}
+```
+
+**Error output (stderr)**
+
+```json
+{
+  "status": "error",
+  "error": "checkpoint not found: xyz"
+}
+```
 
 ## Checkpoint ID resolution
 

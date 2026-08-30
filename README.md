@@ -22,7 +22,7 @@ varn diff <checkpoint-id>
 varn restore <checkpoint-id>
 ```
 
-See [installation instructions](docs/install.md) to get started.
+See [installation instructions](INSTALL.md) to get started.
 
 ## Commands
 
@@ -59,16 +59,16 @@ See the [CLI usage reference](docs/usage.md) for details.
 ## Limitations
 
 No extended attributes (xattr), no ACL restoration, no concurrent scanning,
-no streaming restore, no incremental restore. See
-[Future Work](docs/future.md) for the full list.
+no streaming restore, no incremental restore. See [FUTURE.md](FUTURE.md) for
+the full list.
 
 ## Documentation
 
-- [Install](docs/install.md) — get Varn running
+- [Install](INSTALL.md) — get Varn running
 - [CLI usage](docs/usage.md) — command reference
 - [Safety model](docs/safety.md) — guarantees and restore pipeline
 - [Architecture](docs/architecture.md) — internals and design decisions
-- [Future work](docs/future.md) — planned features and known limitations
+- [Future work](FUTURE.md) — planned features and known limitations
 - [Contributing](CONTRIBUTING.md) — how to contribute
 - [Changelog](CHANGELOG.md) — version history
 
