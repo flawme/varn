@@ -481,7 +481,7 @@ mod tests {
         let paths: Vec<_> = result
             .entries
             .iter()
-            .map(|e| e.path.to_string_lossy().to_string())
+            .map(|e| e.path.to_string_lossy().replace('\\', "/"))
             .collect();
         assert!(paths.iter().all(|p| !p.starts_with(".varn")));
         assert_eq!(paths, vec!["real.txt"]);
@@ -619,7 +619,7 @@ mod tests {
         let paths: Vec<_> = result
             .entries
             .iter()
-            .map(|e| e.path.to_string_lossy().to_string())
+            .map(|e| e.path.to_string_lossy().replace('\\', "/"))
             .collect();
         assert!(!paths.contains(&"app.log".to_string()));
         assert!(paths.contains(&"main.rs".to_string()));
@@ -638,7 +638,7 @@ mod tests {
         let paths: Vec<_> = result
             .entries
             .iter()
-            .map(|e| e.path.to_string_lossy().to_string())
+            .map(|e| e.path.to_string_lossy().replace('\\', "/"))
             .collect();
         assert!(!paths.contains(&"target".to_string()));
         assert!(!paths.contains(&"target/debug".to_string()));
@@ -659,7 +659,7 @@ mod tests {
         let paths: Vec<_> = result
             .entries
             .iter()
-            .map(|e| e.path.to_string_lossy().to_string())
+            .map(|e| e.path.to_string_lossy().replace('\\', "/"))
             .collect();
         assert!(!paths.contains(&"app.log".to_string()));
         assert!(paths.contains(&"important.log".to_string()));
@@ -690,7 +690,7 @@ mod tests {
         let paths: Vec<_> = result
             .entries
             .iter()
-            .map(|e| e.path.to_string_lossy().to_string())
+            .map(|e| e.path.to_string_lossy().replace('\\', "/"))
             .collect();
         assert!(!paths.contains(&"src/cache".to_string()));
         assert!(!paths.contains(&"src/cache/data.bin".to_string()));

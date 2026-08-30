@@ -126,7 +126,7 @@ impl ScanCache {
         let mut cache = Self::new();
         cache.version = CACHE_VERSION;
         for entry in entries {
-            let path_str = entry.path.to_string_lossy().to_string();
+            let path_str = entry.path.to_string_lossy().replace('\\', "/");
             cache.insert(
                 &path_str,
                 CachedEntry {

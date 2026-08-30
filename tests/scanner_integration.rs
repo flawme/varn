@@ -66,7 +66,7 @@ fn scan_nested_directories() {
     let paths: Vec<String> = result
         .entries
         .iter()
-        .map(|e| e.path.to_string_lossy().to_string())
+        .map(|e| e.path.to_string_lossy().replace('\\', "/"))
         .collect();
     assert!(paths.contains(&"README.md".to_string()));
     assert!(paths.contains(&"src".to_string()));
@@ -88,7 +88,7 @@ fn scan_entries_are_sorted_by_path() {
     let paths: Vec<String> = result
         .entries
         .iter()
-        .map(|e| e.path.to_string_lossy().to_string())
+        .map(|e| e.path.to_string_lossy().replace('\\', "/"))
         .collect();
 
     let mut expected = paths.clone();
@@ -142,7 +142,7 @@ fn scan_skips_varn_directory_at_root() {
     let paths: Vec<String> = result
         .entries
         .iter()
-        .map(|e| e.path.to_string_lossy().to_string())
+        .map(|e| e.path.to_string_lossy().replace('\\', "/"))
         .collect();
 
     assert!(paths.iter().all(|p| !p.starts_with(".varn")));
@@ -163,7 +163,7 @@ fn scan_skips_varn_in_subdirectory() {
     let paths: Vec<String> = result
         .entries
         .iter()
-        .map(|e| e.path.to_string_lossy().to_string())
+        .map(|e| e.path.to_string_lossy().replace('\\', "/"))
         .collect();
 
     assert!(!paths.contains(&"project/.varn".to_string()));
@@ -323,7 +323,7 @@ fn scan_does_not_follow_symlink_to_directory() {
         let paths: Vec<String> = result
             .entries
             .iter()
-            .map(|e| e.path.to_string_lossy().to_string())
+            .map(|e| e.path.to_string_lossy().replace('\\', "/"))
             .collect();
         assert!(
             !paths.iter().any(|p| p.starts_with("link_dir/")),
