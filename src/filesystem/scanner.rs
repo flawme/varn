@@ -176,7 +176,12 @@ impl Scanner {
             // Check ignore rules. We need the kind to know if this is a
             // directory (for directory-only patterns). If ignored, skip
             // this entry and do not recurse into it.
-            let rel_str = rel.to_string_lossy();
+            //
+            // Normalize to forward slashes for cross-platform consistency:
+            // the ignore matcher splits on `/`, but on Windows `PathBuf`
+            // uses `\`. Without this, patterns like `**/cache/` would not
+            // match `src\cache` on Windows.
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
             if self
                 .ignore
                 .is_ignored(&rel_str, kind == EntryKind::Directory)
@@ -188,7 +193,6 @@ impl Scanner {
 
             let hash = if kind == EntryKind::File {
                 // Try the cache first: if size and mtime match, reuse the hash.
-                let rel_str = rel.to_string_lossy();
                 if let Some(cached_hash) = self.cache.cached_hash(&rel_str, meta.len(), mtime) {
                     Some(cached_hash.to_string())
                 } else {
