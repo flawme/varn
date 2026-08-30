@@ -118,14 +118,16 @@ mod tests {
         std::fs::write(&target, b"x").unwrap();
         let link = tmp.path().join("link");
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&target, &link).unwrap();
+        {
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let meta = std::fs::symlink_metadata(&link).unwrap();
+            let kind = EntryKind::from_file_type(meta.file_type());
+            assert_eq!(kind, EntryKind::Symlink);
+        }
         #[cfg(not(unix))]
         {
-            return;
+            let _ = (target, link);
         }
-        let meta = std::fs::symlink_metadata(&link).unwrap();
-        let kind = EntryKind::from_file_type(meta.file_type());
-        assert_eq!(kind, EntryKind::Symlink);
     }
 
     #[test]

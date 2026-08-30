@@ -176,16 +176,19 @@ fn scan_records_symlink_as_symlink_not_followed() {
     let tmp = TempDir::new().unwrap();
     fs::write(tmp.path().join("target.txt"), b"target content").unwrap();
     #[cfg(unix)]
-    std::os::unix::fs::symlink(tmp.path().join("target.txt"), tmp.path().join("link.txt")).unwrap();
+    {
+        std::os::unix::fs::symlink(tmp.path().join("target.txt"), tmp.path().join("link.txt"))
+            .unwrap();
+
+        let result = Scanner::new(tmp.path()).scan().unwrap();
+        let link = find_entry(&result, "link.txt");
+        assert_eq!(link.meta.kind, EntryKind::Symlink);
+        assert_eq!(link.meta.hash, None);
+    }
     #[cfg(not(unix))]
     {
-        return;
+        let _ = tmp;
     }
-
-    let result = Scanner::new(tmp.path()).scan().unwrap();
-    let link = find_entry(&result, "link.txt");
-    assert_eq!(link.meta.kind, EntryKind::Symlink);
-    assert_eq!(link.meta.hash, None);
 }
 
 #[test]
@@ -309,25 +312,28 @@ fn scan_does_not_follow_symlink_to_directory() {
     fs::create_dir_all(tmp.path().join("real_dir")).unwrap();
     fs::write(tmp.path().join("real_dir/inside.txt"), b"inside").unwrap();
     #[cfg(unix)]
-    std::os::unix::fs::symlink(tmp.path().join("real_dir"), tmp.path().join("link_dir")).unwrap();
+    {
+        std::os::unix::fs::symlink(tmp.path().join("real_dir"), tmp.path().join("link_dir"))
+            .unwrap();
+
+        let result = Scanner::new(tmp.path()).scan().unwrap();
+        let link = find_entry(&result, "link_dir");
+        assert_eq!(link.meta.kind, EntryKind::Symlink);
+        // The contents of real_dir should NOT appear under link_dir.
+        let paths: Vec<String> = result
+            .entries
+            .iter()
+            .map(|e| e.path.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !paths.iter().any(|p| p.starts_with("link_dir/")),
+            "symlinked directory should not be traversed"
+        );
+    }
     #[cfg(not(unix))]
     {
-        return;
+        let _ = tmp;
     }
-
-    let result = Scanner::new(tmp.path()).scan().unwrap();
-    let link = find_entry(&result, "link_dir");
-    assert_eq!(link.meta.kind, EntryKind::Symlink);
-    // The contents of real_dir should NOT appear under link_dir.
-    let paths: Vec<String> = result
-        .entries
-        .iter()
-        .map(|e| e.path.to_string_lossy().to_string())
-        .collect();
-    assert!(
-        !paths.iter().any(|p| p.starts_with("link_dir/")),
-        "symlinked directory should not be traversed"
-    );
 }
 
 #[test]

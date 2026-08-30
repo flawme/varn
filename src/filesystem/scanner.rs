@@ -398,6 +398,7 @@ fn detect_hard_links(entries: &mut [TreeEntry]) {
 }
 
 /// Convert a hash string to a u64 for use as a map key.
+#[cfg(unix)]
 fn hash_to_u64(hash: &str) -> u64 {
     // Use the first 16 hex chars (64 bits) as a key.
     let prefix = &hash[..hash.len().min(16)];
@@ -501,21 +502,23 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("target.txt"), b"target").unwrap();
         #[cfg(unix)]
-        std::os::unix::fs::symlink(tmp.path().join("target.txt"), tmp.path().join("link.txt"))
-            .unwrap();
+        {
+            std::os::unix::fs::symlink(tmp.path().join("target.txt"), tmp.path().join("link.txt"))
+                .unwrap();
+            let result = Scanner::new(tmp.path()).scan().unwrap();
+            let link = find_entry(&result, "link.txt");
+            assert_eq!(link.meta.kind, EntryKind::Symlink);
+            assert_eq!(link.meta.hash, None, "symlinks should not be hashed");
+            assert_eq!(
+                link.meta.target.as_deref(),
+                Some(tmp.path().join("target.txt").as_path()),
+                "symlink target should be captured"
+            );
+        }
         #[cfg(not(unix))]
         {
-            return;
+            let _ = tmp;
         }
-        let result = Scanner::new(tmp.path()).scan().unwrap();
-        let link = find_entry(&result, "link.txt");
-        assert_eq!(link.meta.kind, EntryKind::Symlink);
-        assert_eq!(link.meta.hash, None, "symlinks should not be hashed");
-        assert_eq!(
-            link.meta.target.as_deref(),
-            Some(tmp.path().join("target.txt").as_path()),
-            "symlink target should be captured"
-        );
     }
 
     #[test]

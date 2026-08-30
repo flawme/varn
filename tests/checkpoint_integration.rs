@@ -467,19 +467,22 @@ fn checkpoint_with_symlink() {
     let repo = Repo::init(tmp.path(), "linux").unwrap();
     write_file(tmp.path(), "target.txt", b"target");
     #[cfg(unix)]
-    std::os::unix::fs::symlink(tmp.path().join("target.txt"), tmp.path().join("link.txt")).unwrap();
+    {
+        std::os::unix::fs::symlink(tmp.path().join("target.txt"), tmp.path().join("link.txt"))
+            .unwrap();
+
+        let snapshot = create_checkpoint(&repo, "symlink test");
+
+        let link = snapshot
+            .entries
+            .iter()
+            .find(|e| e.path == std::path::Path::new("link.txt"))
+            .expect("symlink should be in snapshot");
+        assert_eq!(link.meta.kind, EntryKind::Symlink);
+        assert!(link.meta.hash.is_none());
+    }
     #[cfg(not(unix))]
     {
-        return;
+        let _ = (repo, tmp);
     }
-
-    let snapshot = create_checkpoint(&repo, "symlink test");
-
-    let link = snapshot
-        .entries
-        .iter()
-        .find(|e| e.path == std::path::Path::new("link.txt"))
-        .expect("symlink should be in snapshot");
-    assert_eq!(link.meta.kind, EntryKind::Symlink);
-    assert!(link.meta.hash.is_none());
 }
