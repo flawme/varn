@@ -1,15 +1,69 @@
 # Installation
 
-## Prerequisites
+## Option 1: Download prebuilt binary (recommended)
 
-Varn requires **Rust 1.85+** (Rust 2024 edition). If you don't have Rust installed:
+Prebuilt binaries are available on the [releases page](https://github.com/flawme/varn/releases).
+
+### Linux (x86_64)
+
+```bash
+curl -L https://github.com/flawme/varn/releases/latest/download/varn-linux-x86_64 -o ~/.local/bin/varn
+chmod +x ~/.local/bin/varn
+```
+
+If `~/.local/bin` is not on your PATH:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### macOS (x86_64)
+
+```bash
+curl -L https://github.com/flawme/varn/releases/latest/download/varn-macos-x86_64 -o /usr/local/bin/varn
+chmod +x /usr/local/bin/varn
+```
+
+If you get a permission denied, use `sudo` or install to `~/.local/bin` instead.
+
+### Windows (x86_64)
+
+```powershell
+curl -L https://github.com/flawme/varn/releases/latest/download/varn-windows-x86_64.exe -o "$env:USERPROFILE\.cargo\bin\varn.exe"
+```
+
+Or download the file directly from the [releases page](https://github.com/flawme/varn/releases) and place it in a directory on your `PATH`.
+
+### One-liner (Linux)
+
+```bash
+curl -L https://github.com/flawme/varn/releases/latest/download/varn-linux-x86_64 -o /usr/local/bin/varn && chmod +x /usr/local/bin/varn
+```
+
+### One-liner (macOS)
+
+```bash
+curl -L https://github.com/flawme/varn/releases/latest/download/varn-macos-x86_64 -o /usr/local/bin/varn && chmod +x /usr/local/bin/varn
+```
+
+## Option 2: Install with Cargo
+
+```bash
+cargo install --git https://github.com/flawme/varn.git
+```
+
+This downloads, builds, and installs `varn` to `~/.cargo/bin/` automatically. Requires **Rust 1.85+**.
+
+If you don't have Rust installed:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
+cargo install --git https://github.com/flawme/varn.git
 ```
 
-## Option 1: Build from source (recommended)
+## Option 3: Build from source
 
 ```bash
 git clone https://github.com/flawme/varn.git
@@ -27,7 +81,7 @@ The binary is at `target/release/varn`.
 sudo cp target/release/varn /usr/local/bin/
 ```
 
-Or, without sudo, add to your user bin:
+Or, without sudo:
 
 ```bash
 mkdir -p ~/.local/bin
@@ -48,26 +102,6 @@ source ~/.zshrc
 ```powershell
 Copy-Item target\release\varn.exe "$env:USERPROFILE\.cargo\bin\"
 ```
-
-Or copy to any directory already on your `PATH`.
-
-## Option 2: Install with Cargo
-
-```bash
-cargo install --git https://github.com/flawme/varn.git
-```
-
-This downloads, builds, and installs `varn` to `~/.cargo/bin/` automatically.
-
-## Option 3: One-liner (Linux / macOS)
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
-source "$HOME/.cargo/env" && \
-cargo install --git https://github.com/flawme/varn.git
-```
-
-This installs Rust if needed, then builds and installs Varn in one go.
 
 ## Verify installation
 
