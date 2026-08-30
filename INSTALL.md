@@ -1,6 +1,30 @@
 # Installation
 
-## Option 1: Download prebuilt binary (recommended)
+## Option 1: Install script (recommended)
+
+The install script auto-detects your platform, downloads the binary, and adds it to your PATH:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/flawme/varn/main/install.sh | sh
+```
+
+To install a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/flawme/varn/main/install.sh | sh -s -- v0.1.0
+```
+
+Options:
+
+| Flag | Description |
+|------|-------------|
+| `--bin-dir <path>` | Override the install directory |
+| `--no-modify-path` | Do not modify shell config |
+| `<version>` | Install a specific version (e.g. `v0.1.0`) |
+
+**Supported platforms:** Linux and macOS on x86_64 and aarch64. Windows users should use Option 2 below.
+
+## Option 2: Download prebuilt binary manually
 
 Prebuilt binaries are available on the [releases page](https://github.com/flawme/varn/releases).
 
@@ -35,19 +59,7 @@ curl -L https://github.com/flawme/varn/releases/latest/download/varn-windows-x86
 
 Or download the file directly from the [releases page](https://github.com/flawme/varn/releases) and place it in a directory on your `PATH`.
 
-### One-liner (Linux)
-
-```bash
-curl -L https://github.com/flawme/varn/releases/latest/download/varn-linux-x86_64 -o /usr/local/bin/varn && chmod +x /usr/local/bin/varn
-```
-
-### One-liner (macOS)
-
-```bash
-curl -L https://github.com/flawme/varn/releases/latest/download/varn-macos-x86_64 -o /usr/local/bin/varn && chmod +x /usr/local/bin/varn
-```
-
-## Option 2: Install with Cargo
+## Option 3: Install with Cargo
 
 ```bash
 cargo install --git https://github.com/flawme/varn.git
@@ -63,7 +75,7 @@ source "$HOME/.cargo/env"
 cargo install --git https://github.com/flawme/varn.git
 ```
 
-## Option 3: Build from source
+## Option 4: Build from source
 
 ```bash
 git clone https://github.com/flawme/varn.git
