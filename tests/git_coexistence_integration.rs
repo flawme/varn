@@ -199,5 +199,8 @@ fn find_git_root_matches_repo_layout() {
     fs::create_dir_all(&root).unwrap();
     make_git_repo(&root);
 
-    assert_eq!(find_git_root(&root), Some(root.clone()));
+    // find_git_root returns a fully resolved path; canonicalize the
+    // expectation so the comparison holds on macOS (/var -> /private/var).
+    let expected = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+    assert_eq!(find_git_root(&root), Some(expected));
 }
