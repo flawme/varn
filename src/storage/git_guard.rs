@@ -233,6 +233,13 @@ mod tests {
         varn_dir
     }
 
+    /// Canonicalize a path the way `find_git_root` does, for comparisons on
+    /// systems where temp dirs are behind symlinks (macOS `/var` ->
+    /// `/private/var`).
+    fn resolved(p: &Path) -> PathBuf {
+        fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    }
+
     #[test]
     fn find_git_root_finds_enclosing_repo() {
         let tmp = TempDir::new().unwrap();
@@ -241,7 +248,7 @@ mod tests {
         let deep = git_root.join("a/b");
         fs::create_dir_all(&deep).unwrap();
 
-        assert_eq!(find_git_root(&deep), Some(git_root));
+        assert_eq!(find_git_root(&deep), Some(resolved(&git_root)));
     }
 
     #[test]
@@ -251,7 +258,7 @@ mod tests {
         fs::create_dir_all(&git_root).unwrap();
         fs::write(git_root.join(".git"), b"gitdir: /somewhere/else\n").unwrap();
 
-        assert_eq!(find_git_root(&git_root), Some(git_root));
+        assert_eq!(find_git_root(&git_root), Some(resolved(&git_root)));
     }
 
     #[test]
