@@ -297,12 +297,12 @@ fn mtime_to_unix(meta: &fs::Metadata) -> Option<i64> {
 /// Windows, it queries `GetFileInformationByHandle` (NTFS reports the link
 /// count; FAT/exFAT report 1). On other platforms, hard links are not
 /// tracked, so this always returns 1.
-fn get_nlink(path: &Path, meta: &fs::Metadata) -> u32 {
+fn get_nlink(path: &Path, _meta: &fs::Metadata) -> u32 {
     #[cfg(unix)]
     {
         let _ = path;
         use std::os::unix::fs::MetadataExt;
-        meta.nlink() as u32
+        _meta.nlink() as u32
     }
     #[cfg(windows)]
     {
@@ -310,7 +310,7 @@ fn get_nlink(path: &Path, meta: &fs::Metadata) -> u32 {
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (path, meta);
+        let _ = path;
         1
     }
 }

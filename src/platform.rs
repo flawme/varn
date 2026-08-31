@@ -116,7 +116,7 @@ pub fn set_file_attributes(path: &Path, attributes: u32) -> std::io::Result<()> 
     use windows_sys::Win32::Storage::FileSystem::SetFileAttributesW;
 
     let wide: Vec<u16> = OsStr::new(path)
-        .as_wide()
+        .encode_wide()
         .chain(std::iter::once(0))
         .collect();
     let rc = unsafe { SetFileAttributesW(wide.as_ptr(), attributes) };
@@ -147,7 +147,7 @@ pub fn windows_link_count(path: &Path) -> Option<u32> {
     }
 
     let wide: Vec<u16> = OsStr::new(path)
-        .as_wide()
+        .encode_wide()
         .chain(std::iter::once(0))
         .collect();
     let handle = unsafe {
@@ -190,7 +190,7 @@ pub fn get_security_descriptor_sddl(path: &Path) -> Option<String> {
     };
 
     let wide: Vec<u16> = OsStr::new(path)
-        .as_wide()
+        .encode_wide()
         .chain(std::iter::once(0))
         .collect();
 
@@ -252,11 +252,11 @@ pub fn set_security_descriptor(path: &Path, sddl: &str) -> std::io::Result<()> {
     };
 
     let sddl_wide: Vec<u16> = OsStr::new(sddl)
-        .as_wide()
+        .encode_wide()
         .chain(std::iter::once(0))
         .collect();
     let path_wide: Vec<u16> = OsStr::new(path)
-        .as_wide()
+        .encode_wide()
         .chain(std::iter::once(0))
         .collect();
 
