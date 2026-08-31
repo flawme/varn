@@ -81,7 +81,7 @@ pub fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
 
 /// Set macOS BSD file flags (`st_flags`) on a path.
 ///
-/// Uses `chflags(2)`. Best-effort by design: the caller treats
+/// Uses `lchflags(2)`. Best-effort by design: the caller treats
 /// `PermissionDenied` as a warning, not a failure, because privileged flags
 /// (e.g. `schg`, system immutable) require root.
 #[cfg(target_os = "macos")]
@@ -89,9 +89,16 @@ pub fn set_bsd_flags(path: &Path, flags: u32) -> std::io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
+    // `lchflags` is not exposed by the libc crate on apple targets, so we
+    // declare it directly. Signature from the Darwin man page:
+    // int lchflags(const char *path, u_int flags);
+    extern "C" {
+        fn lchflags(path: *const std::ffi::c_char, flags: u32) -> std::ffi::c_int;
+    }
+
     let c_path = CString::new(path.as_os_str().as_bytes())?;
-    // lchflags: apply to the link itself, not the target.
-    let rc = unsafe { libc::lchflags(c_path.as_ptr(), flags) };
+    // Apply to the link itself, not the target.
+    let rc = unsafe { lchflags(c_path.as_ptr(), flags) };
     if rc != 0 {
         return Err(std::io::Error::last_os_error());
     }
