@@ -92,7 +92,7 @@ pub fn set_bsd_flags(path: &Path, flags: u32) -> std::io::Result<()> {
     // `lchflags` is not exposed by the libc crate on apple targets, so we
     // declare it directly. Signature from the Darwin man page:
     // int lchflags(const char *path, u_int flags);
-    extern "C" {
+    unsafe extern "C" {
         fn lchflags(path: *const std::ffi::c_char, flags: u32) -> std::ffi::c_int;
     }
 
