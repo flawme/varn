@@ -43,7 +43,20 @@ jobs:
         if: runner.os == 'Windows'
         run: copy target\${{ matrix.target }}\release\varn.exe ${{ matrix.artifact }}
 
+      - name: Compute SHA-256 (Unix)
+        if: runner.os != 'Windows'
+        run: sha256sum ${{ matrix.artifact }} > ${{ matrix.artifact }}.sha256
+
+      - name: Compute SHA-256 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          (Get-FileHash -Algorithm SHA256 "${{ matrix.artifact }}").Hash.ToLower() + "  ${{ matrix.artifact }}" |
+            Out-File -NoNewline -Encoding ascii "${{ matrix.artifact }}.sha256"
+
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.artifact }}
+          files: |
+            ${{ matrix.artifact }}
+            ${{ matrix.artifact }}.sha256
