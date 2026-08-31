@@ -153,7 +153,7 @@ pub fn windows_link_count(path: &Path) -> Option<u32> {
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
-            GENERIC_READ.0,
+            GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null(),
             OPEN_EXISTING,
@@ -216,7 +216,7 @@ pub fn get_security_descriptor_sddl(path: &Path) -> Option<String> {
     let ok = unsafe {
         ConvertSecurityDescriptorToStringSecurityDescriptorW(
             psd,
-            windows_sys::Win32::Security::SECURITY_DESCRIPTOR_REVISION,
+            windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION,
             OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             &mut sddl_ptr,
             &mut sddl_len,
@@ -265,7 +265,7 @@ pub fn set_security_descriptor(path: &Path, sddl: &str) -> std::io::Result<()> {
     let ok = unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl_wide.as_ptr(),
-            windows_sys::Win32::Security::SECURITY_DESCRIPTOR_REVISION,
+            windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION,
             &mut psd,
             &mut len,
         )
