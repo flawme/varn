@@ -183,10 +183,12 @@ pub fn get_security_descriptor_sddl(path: &Path) -> Option<String> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Security::Authorization::{
-        ConvertSecurityDescriptorToStringSecurityDescriptorW, DACL_SECURITY_INFORMATION,
-        GROUP_SECURITY_INFORMATION, GetNamedSecurityInfoW, OWNER_SECURITY_INFORMATION,
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
+        SE_FILE_OBJECT,
     };
-    use windows_sys::Win32::Security::SE_FILE_OBJECT;
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+    };
 
     let wide: Vec<u16> = OsStr::new(path)
         .as_wide()
@@ -244,10 +246,12 @@ pub fn set_security_descriptor(path: &Path, sddl: &str) -> std::io::Result<()> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, DACL_SECURITY_INFORMATION,
-        GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, SetNamedSecurityInfoW,
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW,
+        SE_FILE_OBJECT,
     };
-    use windows_sys::Win32::Security::SE_FILE_OBJECT;
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+    };
 
     let sddl_wide: Vec<u16> = OsStr::new(sddl)
         .as_wide()
