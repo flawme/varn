@@ -90,6 +90,33 @@ pub enum RestoreAction {
     /// Create a hard link from `path` to `target` (another file in the
     /// snapshot). The target must have been restored first.
     CreateHardLink { path: PathBuf, target: PathBuf },
+    /// Apply directory metadata (mtime, mode, ownership, attributes) after
+    /// all children have been restored.
+    ///
+    /// Creating, writing, or deleting entries inside a directory updates the
+    /// directory's own mtime, so directory metadata must be applied in a
+    /// post-order pass — after every child action — or the restored mtime is
+    /// immediately clobbered. The executor runs these actions last,
+    /// deepest-path first.
+    ApplyDirMeta {
+        path: PathBuf,
+        /// Whether the directory should be read-only after restore.
+        readonly: bool,
+        /// Modification time to restore (unix seconds), if available.
+        mtime: Option<i64>,
+        /// User ID to restore (Unix only), if available.
+        uid: Option<u32>,
+        /// Group ID to restore (Unix only), if available.
+        gid: Option<u32>,
+        /// Full Unix permission mode to restore, if available.
+        mode: Option<u32>,
+        /// macOS BSD file flags to restore, if available.
+        flags: Option<u32>,
+        /// Windows file attributes to restore, if available.
+        attributes: Option<u32>,
+        /// Windows security descriptor (SDDL) to restore, if available.
+        acl: Option<String>,
+    },
     /// Delete a file or directory that exists now but not in the checkpoint.
     Delete { path: PathBuf },
 }
@@ -342,6 +369,28 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
         }
     }
 
+    // Directory metadata pass: every directory in the snapshot gets an
+    // ApplyDirMeta action, executed after all child entries are restored
+    // (child operations update the parent directory's mtime). Directories
+    // that already exist with matching metadata still get the action — it
+    // is cheap and idempotent, and skipping the comparison here would
+    // duplicate the drift logic for every metadata field.
+    for (path, snap_entry) in &snap_map {
+        if snap_entry.meta.kind == EntryKind::Directory {
+            actions.push(RestoreAction::ApplyDirMeta {
+                path: (*path).clone(),
+                readonly: snap_entry.meta.readonly,
+                mtime: snap_entry.meta.mtime,
+                uid: snap_entry.meta.uid,
+                gid: snap_entry.meta.gid,
+                mode: snap_entry.meta.mode,
+                flags: snap_entry.meta.flags,
+                attributes: snap_entry.meta.attributes,
+                acl: snap_entry.meta.acl.clone(),
+            });
+        }
+    }
+
     // Sort actions for deterministic execution:
     // 1. Delete entries that are being replaced (kind changes) — must happen
     //    before creating the new version at the same path.
@@ -349,6 +398,9 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
     // 3. Write files and create symlinks
     // 4. Delete unexpected entries (not in snapshot) — last, so we don't
     //    delete a dir then try to create inside it.
+    // 5. ApplyDirMeta — after everything above, deepest-path first, so a
+    //    directory's restored mtime is not clobbered by later child
+    //    operations (and children sort before their parents).
     //
     // We distinguish "replace" deletes from "unexpected" deletes by checking
     // whether the path also has a Create/Write/Symlink action in the plan.
@@ -372,6 +424,15 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
         RestoreAction::CreateHardLink { path, .. } => (2, path.clone()),
         // Unexpected deletes go last.
         RestoreAction::Delete { path } => (3, path.clone()),
+        // Directory metadata pass: last of all. Sorting by (depth, path)
+        // puts deeper directories after shallower ones within the pass, and
+        // the executor visits the pass in REVERSE order so the deepest
+        // directory's metadata is applied first and a parent's mtime is not
+        // clobbered by a later child operation.
+        RestoreAction::ApplyDirMeta { path, .. } => {
+            let depth = path.components().count() as u32;
+            (4 + depth, path.clone())
+        }
     });
 
     RestorePlan {
@@ -568,8 +629,51 @@ mod tests {
         let current = vec![];
         let plan = plan_restore(&snapshot, &current);
         assert!(!plan.has_conflicts());
-        assert_eq!(plan.actions.len(), 1);
+        // CreateDir + ApplyDirMeta (the metadata pass runs after children).
+        assert_eq!(plan.actions.len(), 2);
         assert!(matches!(plan.actions[0], RestoreAction::CreateDir { .. }));
+        assert!(matches!(
+            plan.actions[1],
+            RestoreAction::ApplyDirMeta { .. }
+        ));
+    }
+
+    #[test]
+    fn plan_restore_dir_meta_pass_runs_after_children_deepest_first() {
+        let snapshot = vec![
+            dir_entry("a"),
+            dir_entry("a/b"),
+            file_entry("a/b/f.txt", Some("hash1")),
+        ];
+        let plan = plan_restore(&snapshot, &[]);
+        // 2 CreateDir + 1 WriteFile + 2 ApplyDirMeta.
+        assert_eq!(plan.actions.len(), 5);
+
+        // All ApplyDirMeta actions come last...
+        let positions: Vec<usize> = plan
+            .actions
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| matches!(a, RestoreAction::ApplyDirMeta { .. }).then_some(i))
+            .collect();
+        assert_eq!(positions, vec![3, 4]);
+
+        // ...sorted shallow-to-deep in the plan ("a" then "a/b"); the
+        // executor visits the deferred stack in reverse, so the deepest
+        // directory ("a/b") gets its metadata applied first and the parent's
+        // restored mtime is not clobbered by child operations.
+        assert!(
+            matches!(
+                &plan.actions[3],
+                RestoreAction::ApplyDirMeta { path, .. } if path == &PathBuf::from("a")
+            ),
+            "expected a first in plan, got {:?}",
+            plan.actions[3]
+        );
+        assert!(matches!(
+            &plan.actions[4],
+            RestoreAction::ApplyDirMeta { path, .. } if path == &PathBuf::from("a/b")
+        ));
     }
 
     #[test]

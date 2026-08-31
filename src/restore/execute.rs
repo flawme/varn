@@ -239,6 +239,7 @@ pub fn execute_restore(
             | RestoreAction::WriteFile { path, .. }
             | RestoreAction::CreateSymlink { path, .. }
             | RestoreAction::CreateHardLink { path, .. }
+            | RestoreAction::ApplyDirMeta { path, .. }
             | RestoreAction::Delete { path } => path,
         };
         if !is_safe_relative_path(path) {
@@ -273,7 +274,17 @@ pub fn execute_restore(
         }
     }
 
+    // Execute the actions. ApplyDirMeta actions (which sort last in the
+    // plan) are deferred to a second pass below: they must run after every
+    // child operation because child operations update the parent
+    // directory's mtime. Within the pass they run in reverse plan order
+    // (deepest first) for the same reason.
+    let mut dir_meta_actions: Vec<&RestoreAction> = Vec::new();
     for action in &plan.actions {
+        if let RestoreAction::ApplyDirMeta { .. } = action {
+            dir_meta_actions.push(action);
+            continue;
+        }
         match action {
             RestoreAction::CreateDir {
                 path,
@@ -472,6 +483,46 @@ pub fn execute_restore(
                 }
                 deleted += 1;
             }
+            RestoreAction::ApplyDirMeta { .. } => unreachable!("deferred above"),
+        }
+    }
+
+    // Directory metadata pass: deepest first (plan sorted by depth
+    // ascending; reverse visitation applies deepest last-planned first).
+    for action in dir_meta_actions.into_iter().rev() {
+        if let RestoreAction::ApplyDirMeta {
+            path,
+            readonly,
+            mtime,
+            uid,
+            gid,
+            mode,
+            flags,
+            attributes,
+            acl,
+        } = action
+        {
+            let full = root.join(path);
+            if !full.is_dir() {
+                return Err(VarnError::Other(format!(
+                    "cannot apply directory metadata: {} does not exist or is not a directory",
+                    path.display()
+                )));
+            }
+            apply_metadata(
+                &full,
+                &MetadataToApply {
+                    readonly: *readonly,
+                    mtime: *mtime,
+                    uid: *uid,
+                    gid: *gid,
+                    mode: *mode,
+                    flags: *flags,
+                    attributes: *attributes,
+                    acl: acl.as_deref(),
+                },
+                &mut warnings,
+            );
         }
     }
 
