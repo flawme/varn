@@ -186,23 +186,18 @@ pub fn get_security_descriptor_sddl(path: &Path) -> Option<String> {
         ConvertSecurityDescriptorToStringSecurityDescriptorW, DACL_SECURITY_INFORMATION,
         GROUP_SECURITY_INFORMATION, GetNamedSecurityInfoW, OWNER_SECURITY_INFORMATION,
     };
-    use windows_sys::Win32::Security::{
-        GetSecurityDescriptorGroup, GetSecurityDescriptorOwner, PSECURITY_DESCRIPTOR,
-    };
-    use windows_sys::Win32::Storage::FileSystem::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW,
-    };
+    use windows_sys::Win32::Security::SE_FILE_OBJECT;
 
     let wide: Vec<u16> = OsStr::new(path)
         .as_wide()
         .chain(std::iter::once(0))
         .collect();
 
-    let mut psd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let mut psd: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     let rc = unsafe {
         GetNamedSecurityInfoW(
             wide.as_ptr(),
-            windows_sys::Win32::Storage::FileSystem::SE_FILE_OBJECT,
+            SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
@@ -252,7 +247,7 @@ pub fn set_security_descriptor(path: &Path, sddl: &str) -> std::io::Result<()> {
         ConvertStringSecurityDescriptorToSecurityDescriptorW, DACL_SECURITY_INFORMATION,
         GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, SetNamedSecurityInfoW,
     };
-    use windows_sys::Win32::Storage::FileSystem::SE_FILE_OBJECT;
+    use windows_sys::Win32::Security::SE_FILE_OBJECT;
 
     let sddl_wide: Vec<u16> = OsStr::new(sddl)
         .as_wide()
