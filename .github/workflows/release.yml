@@ -60,3 +60,27 @@ jobs:
           files: |
             ${{ matrix.artifact }}
             ${{ matrix.artifact }}.sha256
+
+  checksums:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all release assets
+        run: |
+          gh release download "$TAG" --repo "$REPO" --dir assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+
+      - name: Build aggregated SHA256SUMS.txt
+        run: |
+          cd assets
+          # Hash only the binaries; the per-asset .sha256 files are excluded.
+          sha256sum varn-* | grep -v '\.sha256' > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload SHA256SUMS.txt to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: assets/SHA256SUMS.txt
