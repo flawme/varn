@@ -9,9 +9,25 @@ Initialize Varn in a directory.
 ```bash
 varn init              # Initialize in current directory
 varn init /path/to/dir # Initialize in a specific directory
+varn init --gitignore  # Also add .varn/ to the root .gitignore
 ```
 
 Creates a `.varn/` directory with storage layout and config. Does not touch any existing files.
+
+If the directory is inside a git repository, Varn also creates
+`.varn/.gitignore` containing `*`, which makes Git ignore the entire store.
+This protects against a blind `git add -A` staging tens of thousands of
+content objects. Nothing outside `.varn/` is modified.
+
+With `--gitignore`, Varn additionally appends `.varn/` to the enclosing
+repository's root `.gitignore` (creating the file if it does not exist). The
+entry is not duplicated if a recognized spelling (`.varn`, `.varn/`,
+`/.varn`, `/.varn/`) is already present. The flag fails with an actionable
+error if the directory is not inside a git repository.
+
+If the store is not excluded from git (for example, a store created by an
+older Varn version), `varn init` and `varn checkpoint` print a warning with
+a copy-pasteable fix. Running `varn migrate` backfills the missing guard.
 
 ### `varn checkpoint`
 
@@ -110,6 +126,10 @@ varn migrate --dry-run   # Check if migration is needed
 
 Reports the current and target storage versions. If the repository is already at the current version, no changes are made. If the repository is at a newer version than the installed Varn supports, an error is returned.
 
+`varn migrate` also backfills the store-level git guard (`.varn/.gitignore`)
+for stores created before it existed. `--dry-run` reports whether the guard
+would be added without writing anything.
+
 ## Ignore patterns
 
 Varn reads `.varnignore` files to exclude paths from checkpoints. The syntax follows gitignore conventions:
@@ -136,6 +156,19 @@ Place a `.varnignore` file at the root of your Varn-managed directory. It is loa
 | `!important.log` | Re-includes a file previously excluded |
 | `file[0-9].txt` | One character from the set `0-9` |
 | `?` | Any single character except `/` |
+
+## Git coexistence
+
+Varn is designed to coexist with Git in the same directory:
+
+- `varn init` creates `.varn/.gitignore` containing `*`, so Git ignores the
+  entire store automatically. Nothing outside `.varn/` is modified.
+- Varn never reads or writes Git metadata (`.git/`, index, refs).
+- `varn checkpoint` skips `.varn/` during scans, so checkpointing a
+  git-managed directory does not capture Git's internals.
+- If the store is not excluded from git (legacy store), commands warn with a
+  one-line fix: `echo '.varn/' >> .gitignore`. `varn init --gitignore`
+  applies it for you; `varn migrate` backfills the store-level guard.
 
 ## Global flags
 

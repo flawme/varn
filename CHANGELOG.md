@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-31
+
 ### Added
 
 - **Ignore patterns** — `.varnignore` files with gitignore-style pattern matching (`*`, `**`, `?`, `[abc]`, `!negation`, directory-only, anchored). Loaded automatically by `varn checkpoint` and `varn diff`.
@@ -15,12 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **uid/gid restoration** — Unix ownership (uid/gid) captured during scan and restored via `chown` during restore (best-effort, requires root for non-owner changes).
 - **Content streaming** — `store_content_blobs` streams file content in 64KB chunks instead of reading entire files into memory. Hash is computed during streaming and verified before committing.
 - **`varn migrate` command** — storage format migration framework. Checks `version` field in `config.json` and applies registered migrations sequentially.
+- **Git coexistence guard** — `varn init` creates `.varn/.gitignore` containing `*`, so Git ignores the entire object store even when the managed directory is a git repository. A blind `git add -A` no longer stages Varn's objects. Nothing outside `.varn/` is touched.
+- **`varn init --gitignore`** — optional flag that adds `.varn/` to the enclosing repository's root `.gitignore` (created if missing, idempotent). Fails with an actionable error if the directory is not inside a git repository.
+- **Unignored-store warning** — `varn init` and `varn checkpoint` warn (text and JSON `warnings`) when the store sits inside a git work tree and is not excluded from git; covers stores created before the guard existed.
+- **Guard backfill in `varn migrate`** — re-running `varn migrate` on a legacy store adds the missing `.varn/.gitignore` guard; `--dry-run` reports without writing.
 
 ### Security
 
 - **CVE-2026-32232 (ZeptoClaw) R3** — `CreateHardLink` target symlink bypass. Fixed by checking that the hard link target is not itself a symlink, preventing aliasing of external inodes.
 - **Predictable temp file name** — `store_content_streaming` used a predictable `<hash>.tmp` temp file name. Fixed by suffixing with the process ID to prevent symlink-based temp file attacks.
 - **Scan cache poisoning** — added `CACHE_VERSION` field to the scan cache. Caches with a mismatched version are discarded. The cache is advisory only and never affects correctness.
+- **Object store staging prevention** — the store-level git guard prevents accidental staging/committing of the content-addressed object store via `git add -A` in a Varn-managed git repository.
 
 ## [0.1.0] - 2026-08-28
 

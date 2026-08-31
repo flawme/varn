@@ -1,6 +1,6 @@
 [package]
 name = "varn"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Local state checkpointing and rollback system"
 license = "MIT OR Apache-2.0"

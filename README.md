@@ -28,6 +28,7 @@ See [installation instructions](INSTALL.md) to get started.
 
 ```text
 varn init [path]           Initialize Varn in a directory
+varn init --gitignore      Also add .varn/ to the root .gitignore
 varn checkpoint <desc>     Capture the current filesystem state
 varn list                  Display available checkpoints
 varn diff <checkpoint>     Compare current state with a checkpoint
@@ -53,6 +54,7 @@ See the [CLI usage reference](docs/usage.md) for details.
 - Ignore patterns via `.varnignore` (gitignore-style syntax)
 - Storage format migration framework (`varn migrate`)
 - Garbage collection with `--dry-run`
+- Git coexistence: the store is automatically gitignored (`.varn/.gitignore`), so `git add -A` never stages Varn's objects
 - `--json` output for AI agent integration
 - Linux, macOS, and Windows support
 

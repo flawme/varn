@@ -38,6 +38,13 @@ pub enum Command {
         /// The directory to initialize. Defaults to the current directory.
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Add `.varn/` to the enclosing repository's root `.gitignore`.
+        ///
+        /// Varn already creates `.varn/.gitignore` (which makes Git ignore
+        /// the store), so this is only needed if you prefer a root-level
+        /// entry. Fails if the directory is not inside a git repository.
+        #[arg(long)]
+        gitignore: bool,
     },
     /// Capture the current filesystem state.
     Checkpoint {
@@ -83,7 +90,7 @@ pub enum Command {
 /// Run a parsed CLI invocation.
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Init { path } => cmd_init(&path, cli.json),
+        Command::Init { path, gitignore } => cmd_init(&path, gitignore, cli.json),
         Command::Checkpoint { description } => cmd_checkpoint(&description, cli.json),
         Command::List => cmd_list(cli.json),
         Command::Diff { checkpoint } => cmd_diff(&checkpoint, cli.json),
@@ -106,8 +113,9 @@ mod tests {
         let cli = Cli::try_parse_from(["varn", "init", "/tmp/foo"]).unwrap();
         assert!(!cli.json);
         assert!(matches!(cli.command, Command::Init { .. }));
-        if let Command::Init { path } = cli.command {
+        if let Command::Init { path, gitignore } = cli.command {
             assert_eq!(path, PathBuf::from("/tmp/foo"));
+            assert!(!gitignore);
         }
     }
 
@@ -185,8 +193,20 @@ mod tests {
     #[test]
     fn cli_parses_init_default_path() {
         let cli = Cli::try_parse_from(["varn", "init"]).unwrap();
-        if let Command::Init { path } = cli.command {
+        if let Command::Init { path, gitignore } = cli.command {
             assert_eq!(path, PathBuf::from("."));
+            assert!(!gitignore);
+        } else {
+            panic!("wrong command");
+        }
+    }
+
+    #[test]
+    fn cli_parses_init_gitignore_flag() {
+        let cli = Cli::try_parse_from(["varn", "init", "--gitignore"]).unwrap();
+        if let Command::Init { path, gitignore } = cli.command {
+            assert_eq!(path, PathBuf::from("."));
+            assert!(gitignore);
         } else {
             panic!("wrong command");
         }

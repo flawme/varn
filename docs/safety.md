@@ -10,6 +10,23 @@ Varn treats restoration as a potentially destructive operation. This document de
 - Varn coexists with Git and never modifies Git metadata.
 - No network communication, no telemetry, no account required.
 
+## Git coexistence
+
+Varn stores tens of thousands of content objects in `.varn/`. To keep those
+objects out of git:
+
+- `varn init` creates `.varn/.gitignore` containing `*`. Git applies
+  `.gitignore` files to their own directory and below, so this alone makes
+  Git ignore the whole store — without Varn touching anything outside
+  `.varn/`.
+- If the store is not excluded (a store created before the guard existed),
+  `varn init` and `varn checkpoint` print an advisory warning with a
+  copy-pasteable fix. The warning never blocks a command.
+- `varn init --gitignore` explicitly appends `.varn/` to the enclosing
+  repository's root `.gitignore`; `varn migrate` backfills the store-level
+  guard on legacy stores.
+- Varn never reads or writes Git metadata.
+
 ## Idempotent checkpointing
 
 Checkpointing the same state twice does not duplicate or overwrite. The second checkpoint is a no-op, reported as `status: "unchanged"` in JSON mode.

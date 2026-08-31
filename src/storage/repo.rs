@@ -1,6 +1,7 @@
 //! Repository configuration, initialization, and discovery.
 
 use crate::error::{Result, VarnError};
+use crate::storage::git_guard;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -68,6 +69,10 @@ impl Repo {
     ///
     /// This creates the `.varn/` directory, subdirectories, and writes the
     /// config file. It does not modify anything outside `.varn/`.
+    ///
+    /// A store-level git guard (`.varn/.gitignore` containing `*`) is also
+    /// created so Git ignores the store's contents even when the managed
+    /// directory is a git repository. See [`crate::storage::git_guard`].
     pub fn init(root: &Path, platform: &str) -> Result<Self> {
         let varn_dir = root.join(VARN_DIR);
         if varn_dir.exists() {
@@ -78,6 +83,7 @@ impl Repo {
         for subdir in SUBDIRS {
             fs::create_dir_all(varn_dir.join(subdir))?;
         }
+        git_guard::ensure_guard(&varn_dir)?;
 
         let config = RepoConfig {
             version: STORAGE_VERSION,

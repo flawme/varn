@@ -15,14 +15,20 @@
 //! - [`object_store`] — `ObjectStore` for content-addressed blobs
 //! - [`gc`] — garbage collection
 //! - [`migrate`] — storage format migration
+//! - [`git_guard`] — git coexistence: store-level ignore guard and warnings
 
 pub mod gc;
+pub mod git_guard;
 pub mod migrate;
 pub mod object_store;
 pub mod repo;
 
 // Re-export the public API.
 pub use gc::{GcResult, garbage_collect};
+pub use git_guard::{
+    GitCoexistence, GitignoreUpdate, append_to_gitignore, coexistence_warning, ensure_guard,
+    find_git_root, guard_present,
+};
 pub use migrate::{migrate_repo, needs_migration};
 pub use object_store::ObjectStore;
 pub use repo::{Repo, RepoConfig, STORAGE_VERSION, VARN_DIR, find_varn_dir};

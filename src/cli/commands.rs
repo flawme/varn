@@ -12,26 +12,82 @@ use crate::platform;
 use crate::restore;
 use crate::snapshot::SnapshotData;
 use crate::storage::Repo;
+use crate::storage::git_guard;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
 /// `varn init`
-pub fn cmd_init(path: &PathBuf, json: bool) -> Result<()> {
+pub fn cmd_init(path: &PathBuf, gitignore: bool, json: bool) -> Result<()> {
     let abs = absolutize(path)?;
     let repo = Repo::init(&abs, platform::os_name())?;
+
+    // Optional: add `.varn/` to the enclosing repository's root .gitignore.
+    // The store-level guard (`.varn/.gitignore`) already covers this for Git;
+    // this flag is for users who prefer a root-level entry.
+    let mut warnings: Vec<String> = Vec::new();
+    let gitignore_result = if gitignore {
+        match git_guard::find_git_root(&repo.root) {
+            Some(git_root) => match git_guard::append_to_gitignore(&git_root) {
+                Ok(update) => Some(update),
+                Err(e) => return Err(e),
+            },
+            None => {
+                return Err(VarnError::Other(
+                    "--gitignore requested but no git repository found \
+                     (searched upward from the init path)"
+                        .to_string(),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
+    // Advisory: warn if the store is not excluded from git. With the
+    // store-level guard this should not fire, but legacy stores created
+    // before the guard may lack it.
+    if let Some(warning) = git_guard::coexistence_warning(&repo.root, &repo.varn_dir) {
+        warnings.push(warning.to_string());
+    }
+
     if json {
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "status": "ok",
             "root": repo.root,
             "varn_dir": repo.varn_dir,
             "version": repo.config.version,
             "platform": repo.config.platform,
+            "warnings": warnings,
         });
+        if let Some(update) = gitignore_result {
+            output["gitignore"] = match update {
+                git_guard::GitignoreUpdate::Created => serde_json::json!("created"),
+                git_guard::GitignoreUpdate::Appended => serde_json::json!("appended"),
+                git_guard::GitignoreUpdate::AlreadyPresent => serde_json::json!("already_present"),
+            };
+        }
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         println!("Initialized Varn repository at {}", repo.root.display());
         println!("  storage version: {}", repo.config.version);
         println!("  platform: {}", repo.config.platform);
+        if let Some(update) = gitignore_result {
+            let verb = match update {
+                git_guard::GitignoreUpdate::Created => "created",
+                git_guard::GitignoreUpdate::Appended => "added .varn/ to",
+                git_guard::GitignoreUpdate::AlreadyPresent => "already ignored in",
+            };
+            let git_root = git_guard::find_git_root(&repo.root);
+            if let Some(git_root) = git_root {
+                println!(
+                    "  gitignore: {verb} {}",
+                    git_root.join(".gitignore").display()
+                );
+            }
+        }
+        for w in &warnings {
+            println!("  warning: {w}");
+        }
     }
     Ok(())
 }
@@ -67,8 +123,28 @@ pub fn cmd_checkpoint(description: &str, json: bool) -> Result<()> {
     // Persist the snapshot (idempotent: no-op if an identical one exists).
     let saved = snapshot.save(&repo.snapshots_dir())?;
 
+    // Advisory: warn if the store is not excluded from git (legacy stores
+    // created before the store-level guard existed).
+    let git_warning = git_guard::coexistence_warning(&repo.root, &repo.varn_dir);
+
     // Report any scan warnings.
     if json {
+        let mut warnings: Vec<serde_json::Value> = scan_result
+            .warnings
+            .iter()
+            .map(|w| {
+                serde_json::json!({
+                    "path": w.path,
+                    "message": w.message,
+                })
+            })
+            .collect::<Vec<_>>();
+        if let Some(w) = git_warning {
+            warnings.push(serde_json::json!({
+                "path": null,
+                "message": w,
+            }));
+        }
         let output = serde_json::json!({
             "status": if saved { "ok" } else { "unchanged" },
             "checkpoint_id": snapshot.meta.id.0,
@@ -77,12 +153,7 @@ pub fn cmd_checkpoint(description: &str, json: bool) -> Result<()> {
             "root": snapshot.meta.root,
             "entries": snapshot.entries.len(),
             "saved": saved,
-            "warnings": scan_result.warnings.iter().map(|w| {
-                serde_json::json!({
-                    "path": w.path,
-                    "message": w.message,
-                })
-            }).collect::<Vec<_>>(),
+            "warnings": warnings,
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -103,6 +174,9 @@ pub fn cmd_checkpoint(description: &str, json: bool) -> Result<()> {
             for w in &scan_result.warnings {
                 println!("    {}: {}", w.path.display(), w.message);
             }
+        }
+        if let Some(w) = git_warning {
+            println!("  warning: {w}");
         }
     }
     Ok(())
@@ -405,6 +479,15 @@ pub fn cmd_migrate(dry_run: bool, json: bool) -> Result<()> {
 
     let needs = crate::storage::needs_migration(&repo);
 
+    // Backfill the store-level git guard for stores created before it
+    // existed. Safe to run on every migrate: it never overwrites an
+    // existing guard file and never touches anything outside `.varn/`.
+    let guard_added = if dry_run {
+        !git_guard::guard_present(&repo.varn_dir)
+    } else {
+        git_guard::ensure_guard(&repo.varn_dir)?
+    };
+
     if json {
         let output = serde_json::json!({
             "status": if needs { "needs_migration" } else { "ok" },
@@ -412,6 +495,7 @@ pub fn cmd_migrate(dry_run: bool, json: bool) -> Result<()> {
             "target_version": crate::storage::STORAGE_VERSION,
             "needs_migration": needs,
             "dry_run": dry_run,
+            "git_guard": if guard_added { "added" } else { "present" },
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
@@ -432,6 +516,9 @@ pub fn cmd_migrate(dry_run: bool, json: bool) -> Result<()> {
                 "Repository is already at version {} (current).",
                 repo.config.version
             );
+        }
+        if guard_added {
+            println!("  git guard: added .varn/.gitignore (git now ignores the store)");
         }
     }
     Ok(())
