@@ -26,19 +26,14 @@ pub fn cmd_init(path: &PathBuf, gitignore: bool, json: bool) -> Result<()> {
     // this flag is for users who prefer a root-level entry.
     let mut warnings: Vec<String> = Vec::new();
     let gitignore_result = if gitignore {
-        match git_guard::find_git_root(&repo.root) {
-            Some(git_root) => match git_guard::append_to_gitignore(&git_root) {
-                Ok(update) => Some(update),
-                Err(e) => return Err(e),
-            },
-            None => {
-                return Err(VarnError::Other(
-                    "--gitignore requested but no git repository found \
-                     (searched upward from the init path)"
-                        .to_string(),
-                ));
-            }
-        }
+        let git_root = git_guard::find_git_root(&repo.root).ok_or_else(|| {
+            VarnError::Other(
+                "--gitignore requested but no git repository found \
+                 (searched upward from the init path)"
+                    .to_string(),
+            )
+        })?;
+        Some(git_guard::append_to_gitignore(&git_root)?)
     } else {
         None
     };
