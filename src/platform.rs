@@ -183,8 +183,7 @@ pub fn get_security_descriptor_sddl(path: &Path) -> Option<String> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Security::Authorization::{
-        ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
-        SE_FILE_OBJECT,
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
     };
     use windows_sys::Win32::Security::{
         DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
@@ -246,8 +245,7 @@ pub fn set_security_descriptor(path: &Path, sddl: &str) -> std::io::Result<()> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW,
-        SE_FILE_OBJECT,
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
     };
     use windows_sys::Win32::Security::{
         DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
