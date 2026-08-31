@@ -118,6 +118,10 @@ mod tests {
                 hardlink_to: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             },
         }
     }
@@ -201,6 +205,10 @@ mod tests {
                 hardlink_to: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             },
         };
         let dir_new = TreeEntry {
@@ -216,6 +224,10 @@ mod tests {
                 hardlink_to: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             },
         };
         let file_old = entry("src/main.rs", 1);
@@ -244,6 +256,10 @@ mod tests {
                 hardlink_to: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             },
         };
         let dir_new = TreeEntry {
@@ -259,6 +275,10 @@ mod tests {
                 hardlink_to: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             },
         };
         let changes = diff_states(&[dir_old], &[dir_new]);
@@ -285,6 +305,10 @@ mod tests {
                 hardlink_to: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             },
         };
         let dir_new = TreeEntry {
@@ -300,6 +324,10 @@ mod tests {
                 hardlink_to: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             },
         };
         let file_old = entry("src/utils/helper.rs", 1);

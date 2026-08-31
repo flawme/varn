@@ -236,6 +236,10 @@ mod tests {
                 hardlink_to: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             },
         }
     }
@@ -444,6 +448,10 @@ mod tests {
                     hardlink_to: None,
                     uid: None,
                     gid: None,
+                    mode: None,
+                    flags: None,
+                    attributes: None,
+                    acl: None,
                 },
             },
             TreeEntry {
@@ -459,6 +467,10 @@ mod tests {
                     hardlink_to: None,
                     uid: None,
                     gid: None,
+                    mode: None,
+                    flags: None,
+                    attributes: None,
+                    acl: None,
                 },
             },
         ];
@@ -498,6 +510,10 @@ mod tests {
                 hardlink_to: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             },
         }];
 

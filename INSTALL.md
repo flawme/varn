@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/flawme/varn/main/install.sh | sh
 To install a specific version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/flawme/varn/main/install.sh | sh -s -- v0.1.0
+curl -fsSL https://raw.githubusercontent.com/flawme/varn/main/install.sh | sh -s -- v0.2.0
 ```
 
 Options:
@@ -20,7 +20,7 @@ Options:
 |------|-------------|
 | `--bin-dir <path>` | Override the install directory |
 | `--no-modify-path` | Do not modify shell config |
-| `<version>` | Install a specific version (e.g. `v0.1.0`) |
+| `<version>` | Install a specific version (e.g. `v0.2.0`) |
 
 **Supported platforms:** Linux and macOS on x86_64 and aarch64. Windows users should use Option 2 below.
 
@@ -124,7 +124,7 @@ varn --version
 Should output:
 
 ```
-varn 0.1.0
+varn 0.2.0
 ```
 
 ## Quick start

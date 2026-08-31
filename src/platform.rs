@@ -79,6 +79,214 @@ pub fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Set macOS BSD file flags (`st_flags`) on a path.
+///
+/// Uses `chflags(2)`. Best-effort by design: the caller treats
+/// `PermissionDenied` as a warning, not a failure, because privileged flags
+/// (e.g. `schg`, system immutable) require root.
+#[cfg(target_os = "macos")]
+pub fn set_bsd_flags(path: &Path, flags: u32) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = CString::new(path.as_os_str().as_bytes())?;
+    // lchflags: apply to the link itself, not the target.
+    let rc = unsafe { libc::lchflags(c_path.as_ptr(), flags) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Set Windows file attributes (READONLY, HIDDEN, SYSTEM, ARCHIVE, ...).
+///
+/// Uses `SetFileAttributesW`. Note that this replaces the attribute set
+/// wholesale, matching how the attributes were captured.
+#[cfg(windows)]
+pub fn set_file_attributes(path: &Path, attributes: u32) -> std::io::Result<()> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::SetFileAttributesW;
+
+    let wide: Vec<u16> = OsStr::new(path)
+        .as_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let rc = unsafe { SetFileAttributesW(wide.as_ptr(), attributes) };
+    if rc == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Get the number of hard links to a file on Windows.
+///
+/// Opens the file and queries `GetFileInformationByHandle`. Returns `None`
+/// if the file cannot be opened or the filesystem does not report a link
+/// count (FAT/exFAT report 1). Directories always report 1.
+#[cfg(windows)]
+pub fn windows_link_count(path: &Path) -> Option<u32> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::CreateFileW;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING,
+    };
+
+    if path.is_dir() {
+        return Some(1);
+    }
+
+    let wide: Vec<u16> = OsStr::new(path)
+        .as_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_READ.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return None;
+    }
+
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        return None;
+    }
+    Some(info.nNumberOfLinks)
+}
+
+/// Get the Windows security descriptor (owner, group, DACL) in SDDL form.
+///
+/// Uses `GetNamedSecurityInfoW` with `ConvertSecurityDescriptorToStringSecurityDescriptorW`.
+/// Returns `None` if the descriptor cannot be read (never fails the scan).
+#[cfg(windows)]
+pub fn get_security_descriptor_sddl(path: &Path) -> Option<String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, DACL_SECURITY_INFORMATION,
+        GROUP_SECURITY_INFORMATION, GetNamedSecurityInfoW, OWNER_SECURITY_INFORMATION,
+    };
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorGroup, GetSecurityDescriptorOwner, PSECURITY_DESCRIPTOR,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW,
+    };
+
+    let wide: Vec<u16> = OsStr::new(path)
+        .as_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut psd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            wide.as_ptr(),
+            windows_sys::Win32::Storage::FileSystem::SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut psd,
+        )
+    };
+    if rc != 0 || psd.is_null() {
+        return None;
+    }
+
+    let mut sddl_ptr: *mut u16 = std::ptr::null_mut();
+    let mut sddl_len: u32 = 0;
+    let ok = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            psd,
+            windows_sys::Win32::Security::SECURITY_DESCRIPTOR_REVISION,
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut sddl_ptr,
+            &mut sddl_len,
+        )
+    };
+    let result = if ok != 0 && !sddl_ptr.is_null() {
+        let slice = unsafe { std::slice::from_raw_parts(sddl_ptr, sddl_len as usize) };
+        Some(String::from_utf16_lossy(slice))
+    } else {
+        None
+    };
+    unsafe {
+        windows_sys::Win32::Foundation::LocalFree(sddl_ptr as _);
+        windows_sys::Win32::Foundation::LocalFree(psd as _);
+    }
+    result
+}
+
+/// Apply a security descriptor in SDDL form to a path.
+///
+/// Uses `ConvertStringSecurityDescriptorToSecurityDescriptorW` +
+/// `SetNamedSecurityInfoW`. Best-effort by design; the caller warns on
+/// failure.
+#[cfg(windows)]
+pub fn set_security_descriptor(path: &Path, sddl: &str) -> std::io::Result<()> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, DACL_SECURITY_INFORMATION,
+        GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, SetNamedSecurityInfoW,
+    };
+    use windows_sys::Win32::Storage::FileSystem::SE_FILE_OBJECT;
+
+    let sddl_wide: Vec<u16> = OsStr::new(sddl)
+        .as_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let path_wide: Vec<u16> = OsStr::new(path)
+        .as_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut psd: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let mut len: u32 = 0;
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl_wide.as_ptr(),
+            windows_sys::Win32::Security::SECURITY_DESCRIPTOR_REVISION,
+            &mut psd,
+            &mut len,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let rc = unsafe {
+        SetNamedSecurityInfoW(
+            path_wide.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            psd as *mut _,
+            std::ptr::null_mut(),
+        )
+    };
+    unsafe { windows_sys::Win32::Foundation::LocalFree(psd as _) };
+    if rc != 0 {
+        return Err(std::io::Error::from_raw_os_error(rc as i32));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

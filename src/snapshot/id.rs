@@ -73,6 +73,10 @@ mod tests {
                 hardlink_to: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             },
         }
     }

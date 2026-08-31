@@ -236,10 +236,14 @@ impl Scanner {
                     mtime,
                     hash,
                     target,
-                    nlink: get_nlink(&meta),
+                    nlink: get_nlink(&full, &meta),
                     hardlink_to: None,
                     uid: get_uid(&meta),
                     gid: get_gid(&meta),
+                    mode: get_mode(&meta),
+                    flags: get_flags(&full),
+                    attributes: get_attributes(&meta),
+                    acl: get_acl(&full),
                 },
             });
 
@@ -289,17 +293,24 @@ fn mtime_to_unix(meta: &fs::Metadata) -> Option<i64> {
 
 /// Get the number of hard links to a file.
 ///
-/// On Unix, this reads the `nlink` field from the inode metadata. On other
-/// platforms, hard links are not tracked, so this always returns 1.
-fn get_nlink(meta: &fs::Metadata) -> u32 {
+/// On Unix, this reads the `nlink` field from the inode metadata. On
+/// Windows, it queries `GetFileInformationByHandle` (NTFS reports the link
+/// count; FAT/exFAT report 1). On other platforms, hard links are not
+/// tracked, so this always returns 1.
+fn get_nlink(path: &Path, meta: &fs::Metadata) -> u32 {
     #[cfg(unix)]
     {
+        let _ = path;
         use std::os::unix::fs::MetadataExt;
         meta.nlink() as u32
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = meta;
+        crate::platform::windows_link_count(path).unwrap_or(1)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (path, meta);
         1
     }
 }
@@ -332,6 +343,87 @@ fn get_gid(meta: &fs::Metadata) -> Option<u32> {
     #[cfg(not(unix))]
     {
         let _ = meta;
+        None
+    }
+}
+
+/// Get the full Unix permission mode (including setuid/setgid/sticky).
+///
+/// Captured on all Unix platforms so restore can re-apply the complete mode
+/// rather than only the readonly bit. Returns `None` on non-Unix platforms.
+fn get_mode(meta: &fs::Metadata) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Mask to permission bits (incl. setuid/setgid/sticky); the file
+        // type is already captured in `kind`.
+        Some(meta.permissions().mode() & 0o7777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
+/// Get the macOS BSD file flags (`st_flags`).
+///
+/// Captured on macOS only; `None` on all other platforms. Flags such as
+/// `uchg` (user immutable) and `hidden` affect how files can be modified and
+/// are part of the state a checkpoint should preserve.
+fn get_flags(path: &Path) -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // lstat: do not follow symlinks; flags of the link itself matter.
+        let rc = unsafe { libc::lstat(c_path.as_ptr(), &mut stat) };
+        if rc != 0 {
+            return None;
+        }
+        Some(stat.st_flags as u32)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Get the Windows file attributes (READONLY, HIDDEN, SYSTEM, ARCHIVE, ...).
+///
+/// Captured on Windows only; `None` on all other platforms. These are the
+/// attributes users set through Explorer's file properties and are part of
+/// the state a checkpoint should preserve.
+fn get_attributes(meta: &fs::Metadata) -> Option<u32> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        Some(meta.file_attributes())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
+/// Get the Windows security descriptor (owner, group, DACL) in SDDL form.
+///
+/// Captured on Windows only; `None` on all other platforms. Returns `None`
+/// when the descriptor cannot be read — capture is advisory and must not
+/// fail the scan.
+fn get_acl(path: &Path) -> Option<String> {
+    #[cfg(windows)]
+    {
+        crate::platform::get_security_descriptor_sddl(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
         None
     }
 }
@@ -395,14 +487,45 @@ fn detect_hard_links(entries: &mut [TreeEntry]) {
             }
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // Windows NTFS supports hard links; the same content-hash grouping
+        // applies. nlink was captured via GetFileInformationByHandle.
+        use std::collections::BTreeMap;
+
+        let mut groups: BTreeMap<u64, PathBuf> = BTreeMap::new();
+        for entry in entries.iter() {
+            if entry.meta.kind != EntryKind::File || entry.meta.nlink <= 1 {
+                continue;
+            }
+            if let Some(ref hash) = entry.meta.hash {
+                groups
+                    .entry(hash_to_u64(hash))
+                    .or_insert_with(|| entry.path.clone());
+            }
+        }
+        for entry in entries.iter_mut() {
+            if entry.meta.kind != EntryKind::File || entry.meta.nlink <= 1 {
+                continue;
+            }
+            if let Some(ref hash) = entry.meta.hash {
+                let key = hash_to_u64(hash);
+                if let Some(primary) = groups.get(&key) {
+                    if *primary != entry.path {
+                        entry.meta.hardlink_to = Some(primary.clone());
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = entries;
     }
 }
 
 /// Convert a hash string to a u64 for use as a map key.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn hash_to_u64(hash: &str) -> u64 {
     // Use the first 16 hex chars (64 bits) as a key.
     let prefix = &hash[..hash.len().min(16)];

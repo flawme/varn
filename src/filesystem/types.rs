@@ -73,6 +73,29 @@ pub struct EntryMeta {
     /// or if the value could not be determined.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gid: Option<u32>,
+    /// Full Unix permission mode (rwx bits for user/group/other, plus
+    /// setuid/setgid/sticky). Captured on all Unix platforms; `None`
+    /// elsewhere. Restoring applies the complete mode, not just the
+    /// readonly bit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u32>,
+    /// macOS BSD file flags (uchg, schg, hidden, ...). Captured on macOS
+    /// only; `None` elsewhere. Restored best-effort: flags requiring
+    /// privileges are skipped with a warning rather than failing the
+    /// restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flags: Option<u32>,
+    /// Windows file attributes (READONLY, HIDDEN, SYSTEM, ARCHIVE, ...).
+    /// Captured on Windows only; `None` elsewhere. Restored via
+    /// `SetFileAttributes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<u32>,
+    /// Windows security descriptor in SDDL form (owner, group, DACL).
+    /// Captured on Windows only; `None` elsewhere. Restored best-effort via
+    /// `SetNamedSecurityInfoW`; failures produce a warning, never a failed
+    /// restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl: Option<String>,
 }
 
 /// Default value for the `nlink` field (backward-compatible deserialization).
@@ -147,6 +170,10 @@ mod tests {
                 hardlink_to: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             },
         };
         let json = serde_json::to_string(&entry).unwrap();

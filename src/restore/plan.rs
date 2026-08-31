@@ -56,6 +56,14 @@ pub enum RestoreAction {
         uid: Option<u32>,
         /// Group ID to restore (Unix only), if available.
         gid: Option<u32>,
+        /// Full Unix permission mode to restore, if available.
+        mode: Option<u32>,
+        /// macOS BSD file flags to restore, if available.
+        flags: Option<u32>,
+        /// Windows file attributes to restore, if available.
+        attributes: Option<u32>,
+        /// Windows security descriptor (SDDL) to restore, if available.
+        acl: Option<String>,
     },
     /// Create a directory.
     CreateDir {
@@ -68,6 +76,14 @@ pub enum RestoreAction {
         uid: Option<u32>,
         /// Group ID to restore (Unix only), if available.
         gid: Option<u32>,
+        /// Full Unix permission mode to restore, if available.
+        mode: Option<u32>,
+        /// macOS BSD file flags to restore, if available.
+        flags: Option<u32>,
+        /// Windows file attributes to restore, if available.
+        attributes: Option<u32>,
+        /// Windows security descriptor (SDDL) to restore, if available.
+        acl: Option<String>,
     },
     /// Create a symbolic link pointing to `target`.
     CreateSymlink { path: PathBuf, target: PathBuf },
@@ -138,6 +154,10 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                                 mtime: snap_entry.meta.mtime,
                                 uid: snap_entry.meta.uid,
                                 gid: snap_entry.meta.gid,
+                                mode: snap_entry.meta.mode,
+                                flags: snap_entry.meta.flags,
+                                attributes: snap_entry.meta.attributes,
+                                acl: snap_entry.meta.acl.clone(),
                             });
                         } else {
                             warnings.push(format!(
@@ -153,6 +173,10 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                             mtime: snap_entry.meta.mtime,
                             uid: snap_entry.meta.uid,
                             gid: snap_entry.meta.gid,
+                            mode: snap_entry.meta.mode,
+                            flags: snap_entry.meta.flags,
+                            attributes: snap_entry.meta.attributes,
+                            acl: snap_entry.meta.acl.clone(),
                         });
                     }
                     EntryKind::Symlink => {
@@ -195,6 +219,10 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                                     mtime: snap_entry.meta.mtime,
                                     uid: snap_entry.meta.uid,
                                     gid: snap_entry.meta.gid,
+                                    mode: snap_entry.meta.mode,
+                                    flags: snap_entry.meta.flags,
+                                    attributes: snap_entry.meta.attributes,
+                                    acl: snap_entry.meta.acl.clone(),
                                 });
                             }
                         }
@@ -205,6 +233,10 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                                 mtime: snap_entry.meta.mtime,
                                 uid: snap_entry.meta.uid,
                                 gid: snap_entry.meta.gid,
+                                mode: snap_entry.meta.mode,
+                                flags: snap_entry.meta.flags,
+                                attributes: snap_entry.meta.attributes,
+                                acl: snap_entry.meta.acl.clone(),
                             });
                         }
                         EntryKind::Symlink => {
@@ -239,10 +271,18 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                                 mtime: snap_entry.meta.mtime,
                                 uid: snap_entry.meta.uid,
                                 gid: snap_entry.meta.gid,
+                                mode: snap_entry.meta.mode,
+                                flags: snap_entry.meta.flags,
+                                attributes: snap_entry.meta.attributes,
+                                acl: snap_entry.meta.acl.clone(),
                             });
                         }
                     } else if snap_entry.meta.readonly != curr_entry.meta.readonly
                         || snap_entry.meta.mtime != curr_entry.meta.mtime
+                        || snap_entry.meta.mode != curr_entry.meta.mode
+                        || snap_entry.meta.flags != curr_entry.meta.flags
+                        || snap_entry.meta.attributes != curr_entry.meta.attributes
+                        || snap_entry.meta.acl != curr_entry.meta.acl
                     {
                         // Content is the same but metadata (permissions or
                         // mtime) differs. This is not a conflict — restoring
@@ -255,6 +295,10 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                                 mtime: snap_entry.meta.mtime,
                                 uid: snap_entry.meta.uid,
                                 gid: snap_entry.meta.gid,
+                                mode: snap_entry.meta.mode,
+                                flags: snap_entry.meta.flags,
+                                attributes: snap_entry.meta.attributes,
+                                acl: snap_entry.meta.acl.clone(),
                             });
                         }
                     }
@@ -374,6 +418,10 @@ mod tests {
                 hardlink_to: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             },
         }
     }
@@ -392,6 +440,10 @@ mod tests {
                 hardlink_to: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             },
         }
     }
@@ -410,6 +462,10 @@ mod tests {
                 hardlink_to: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             },
         }
     }
@@ -445,6 +501,10 @@ mod tests {
                 hardlink_to: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             },
         }];
         let current = vec![];

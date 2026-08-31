@@ -46,13 +46,27 @@ pub fn verify_restore(root: &Path, snapshot: &[TreeEntry]) -> bool {
                 {
                     return false;
                 }
-                // Compare metadata (readonly, mtime) for all entry types.
-                // This catches a restore that failed to set permissions or
-                // timestamps correctly.
+                // Compare metadata (readonly, mtime, mode, platform metadata)
+                // for all entry types. This catches a restore that failed to
+                // set permissions, timestamps, or platform metadata correctly.
                 if entry.meta.readonly != snap_entry.meta.readonly {
                     return false;
                 }
                 if entry.meta.mtime != snap_entry.meta.mtime {
+                    return false;
+                }
+                // Full mode (Unix): only enforced when the snapshot captured
+                // one (older snapshots fall back to the readonly check).
+                if snap_entry.meta.mode.is_some() && entry.meta.mode != snap_entry.meta.mode {
+                    return false;
+                }
+                // Platform-specific metadata, same rule.
+                if snap_entry.meta.flags.is_some() && entry.meta.flags != snap_entry.meta.flags {
+                    return false;
+                }
+                if snap_entry.meta.attributes.is_some()
+                    && entry.meta.attributes != snap_entry.meta.attributes
+                {
                     return false;
                 }
             }
@@ -84,6 +98,10 @@ mod tests {
                 hardlink_to: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             },
         }
     }

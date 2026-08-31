@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-31
+
+### Added
+
+- **Cross-platform metadata parity** — Varn now captures and restores the
+  same classes of state on Linux, macOS, and Windows:
+  - **Full Unix permission mode** (rwx + setuid/setgid/sticky) is captured
+    on Linux/macOS and fully restored, replacing the previous readonly-bit-
+    only restore. Older snapshots without a mode fall back to readonly-bit
+    behavior.
+  - **Windows file attributes** (READONLY, HIDDEN, SYSTEM, ARCHIVE) are
+    captured and restored via `SetFileAttributesW`.
+  - **macOS BSD file flags** (`uchg`, `hidden`, ...) are captured via
+    `lstat`/`st_flags` and restored via `lchflags`, best-effort: privileged
+    flags are skipped with a warning, never failing the restore.
+  - **Windows hard links** are detected via `GetFileInformationByHandle`
+    (NTFS link counts) and restored with `CreateHardLink` semantics —
+    previously Windows treated hard links as independent copies.
+  - **Windows security descriptors** (owner, group, DACL) are captured in
+    SDDL form and restored via `SetNamedSecurityInfoW`, best-effort.
+- **Metadata drift detection** — restore now plans metadata-only updates
+  when mode, flags, attributes, or ACL differ but content is unchanged
+  (previously only readonly/mtime drift triggered an update).
+- **Best-effort metadata warnings** — metadata that cannot be restored
+  (privilege issues, unsupported filesystems) is reported as a warning in
+  the restore result instead of being silently ignored or failing the
+  operation.
+- **Storage format backward compatibility** — snapshots written by older
+  versions (without the new fields) deserialize unchanged; the new fields
+  are optional with serde defaults.
+
+### Changed
+
+- `EntryMeta` schema extended with `mode`, `flags`, `attributes`, `acl`
+  (all optional, omitted when not applicable to the platform).
+- `RestoreAction::WriteFile`/`CreateDir` carry the new metadata fields.
+- New target-gated dependencies: `libc` (macOS only), `windows-sys`
+  (Windows only). No new dependencies on Linux builds.
+
 ## [0.1.1] - 2026-08-31
 
 ### Added

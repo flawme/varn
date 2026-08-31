@@ -21,6 +21,10 @@ fn file_entry(path: &str, size: u64) -> TreeEntry {
             hardlink_to: None,
             uid: None,
             gid: None,
+            mode: None,
+            flags: None,
+            attributes: None,
+            acl: None,
         },
     }
 }
@@ -39,6 +43,10 @@ fn dir_entry(path: &str) -> TreeEntry {
             hardlink_to: None,
             uid: None,
             gid: None,
+            mode: None,
+            flags: None,
+            attributes: None,
+            acl: None,
         },
     }
 }
@@ -104,6 +112,10 @@ fn diff_detects_modified_readonly() {
             hardlink_to: None,
             uid: None,
             gid: None,
+            mode: None,
+            flags: None,
+            attributes: None,
+            acl: None,
         },
     }];
     let new = vec![TreeEntry {
@@ -119,6 +131,10 @@ fn diff_detects_modified_readonly() {
             hardlink_to: None,
             uid: None,
             gid: None,
+            mode: None,
+            flags: None,
+            attributes: None,
+            acl: None,
         },
     }];
     let changes = diff_states(&old, &new);

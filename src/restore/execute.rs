@@ -41,31 +41,159 @@ fn has_symlink_in_leading_path(root: &Path, full: &Path) -> bool {
     false
 }
 
-/// Apply readonly, mtime, and ownership metadata to a path after it has been
-/// written.
+/// Captured metadata to apply to a restored entry, independent of platform.
 ///
-/// Ownership (uid/gid) is only applied on Unix and only if the process has
-/// permission to do so (root or owner of the file). Failures are silently
-/// ignored — ownership restoration is best-effort, not a hard requirement.
-fn apply_metadata(
-    path: &Path,
-    readonly: bool,
-    mtime: Option<i64>,
-    uid: Option<u32>,
-    gid: Option<u32>,
-) {
-    if readonly {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(meta) = fs::metadata(path) {
-                let mut perms = meta.permissions();
+/// Fields that do not apply to the current platform are `None` and ignored.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MetadataToApply<'a> {
+    /// Whether the entry should be read-only (legacy fallback when no full
+    /// mode was captured).
+    pub readonly: bool,
+    /// Modification time (unix seconds), if available.
+    pub mtime: Option<i64>,
+    /// Unix owner uid, if available.
+    pub uid: Option<u32>,
+    /// Unix owner gid, if available.
+    pub gid: Option<u32>,
+    /// Full Unix permission mode, if captured.
+    pub mode: Option<u32>,
+    /// macOS BSD file flags, if captured.
+    pub flags: Option<u32>,
+    /// Windows file attributes, if captured.
+    pub attributes: Option<u32>,
+    /// Windows security descriptor in SDDL form, if captured.
+    pub acl: Option<&'a str>,
+}
+
+/// Apply captured metadata to a restored entry.
+///
+/// Every step is best-effort: a failure to apply one piece of metadata is
+/// recorded as a warning and never fails the restore. Order matters —
+/// permissions are applied before ownership (chown can clear setuid/setgid
+/// bits), and read-only attributes are applied last so later steps can
+/// still write.
+fn apply_metadata(path: &Path, meta: &MetadataToApply, warnings: &mut Vec<String>) {
+    let MetadataToApply {
+        readonly,
+        mtime,
+        uid,
+        gid,
+        mode,
+        flags,
+        attributes,
+        acl,
+    } = *meta;
+
+    // Full Unix mode (all Unix platforms). Applied when the snapshot has a
+    // mode; falls back to the readonly bit otherwise (older snapshots).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(mode) = mode {
+            if let Ok(m) = fs::metadata(path) {
+                let mut perms = m.permissions();
+                perms.set_mode(mode);
+                if let Err(e) = fs::set_permissions(path, perms) {
+                    warnings.push(format!(
+                        "cannot restore mode {:o} on {}: {e}",
+                        mode,
+                        path.display()
+                    ));
+                }
+            }
+        } else if readonly {
+            if let Ok(m) = fs::metadata(path) {
+                let mut perms = m.permissions();
                 perms.set_mode(perms.mode() & !0o200);
                 let _ = fs::set_permissions(path, perms);
             }
         }
-        #[cfg(not(unix))]
-        {
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+    }
+
+    // Unix ownership. Requires root for changing to a different user.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::chown;
+        if uid.is_some() || gid.is_some() {
+            if let Err(e) = chown(path, uid, gid) {
+                warnings.push(format!(
+                    "cannot restore ownership on {}: {e} (requires appropriate privileges)",
+                    path.display()
+                ));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (uid, gid);
+    }
+
+    // macOS BSD file flags. Best-effort: privileged flags (schg, uchg with
+    // restricted bits) fail with EPERM for unprivileged users; borg's
+    // practice is to warn and continue.
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(flags) = flags {
+            match crate::platform::set_bsd_flags(path, flags) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    warnings.push(format!(
+                        "cannot restore BSD flags {:#x} on {}: requires privileges",
+                        flags,
+                        path.display()
+                    ));
+                }
+                Err(e) => {
+                    warnings.push(format!(
+                        "cannot restore BSD flags {:#x} on {}: {e}",
+                        flags,
+                        path.display()
+                    ));
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = flags;
+    }
+
+    // Windows ACL / security descriptor. Applied before attributes because
+    // a restrictive DACL could block the attribute change.
+    #[cfg(windows)]
+    {
+        if let Some(sddl) = acl {
+            if let Err(e) = crate::platform::set_security_descriptor(path, sddl) {
+                warnings.push(format!(
+                    "cannot restore security descriptor on {}: {}",
+                    path.display(),
+                    e
+                ));
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = acl;
+    }
+
+    // Windows file attributes (READONLY, HIDDEN, SYSTEM, ARCHIVE, ...).
+    #[cfg(windows)]
+    {
+        if let Some(attrs) = attributes {
+            if let Err(e) = crate::platform::set_file_attributes(path, attrs) {
+                warnings.push(format!(
+                    "cannot restore file attributes {:#x} on {}: {}",
+                    attrs,
+                    path.display(),
+                    e
+                ));
+            }
+        } else if readonly {
             if let Ok(meta) = fs::metadata(path) {
                 let mut perms = meta.permissions();
                 perms.set_readonly(true);
@@ -73,20 +201,11 @@ fn apply_metadata(
             }
         }
     }
-    // Restore ownership on Unix. This requires root privileges for changing
-    // to a different user. If it fails, we silently ignore it — ownership
-    // restoration is best-effort.
-    #[cfg(unix)]
+    #[cfg(not(windows))]
     {
-        use std::os::unix::fs::chown;
-        if uid.is_some() || gid.is_some() {
-            let _ = chown(path, uid, gid);
-        }
+        let _ = (attributes, readonly);
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (uid, gid);
-    }
+
     if let Some(ts) = mtime {
         let _ = filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(ts, 0));
     }
@@ -162,6 +281,10 @@ pub fn execute_restore(
                 mtime,
                 uid,
                 gid,
+                mode,
+                flags,
+                attributes,
+                acl,
             } => {
                 let full = root.join(path);
                 // Check for symlink in leading path to prevent escape.
@@ -172,7 +295,20 @@ pub fn execute_restore(
                     )));
                 }
                 fs::create_dir_all(&full)?;
-                apply_metadata(&full, *readonly, *mtime, *uid, *gid);
+                apply_metadata(
+                    &full,
+                    &MetadataToApply {
+                        readonly: *readonly,
+                        mtime: *mtime,
+                        uid: *uid,
+                        gid: *gid,
+                        mode: *mode,
+                        flags: *flags,
+                        attributes: *attributes,
+                        acl: acl.as_deref(),
+                    },
+                    &mut warnings,
+                );
                 dirs_created += 1;
             }
             RestoreAction::WriteFile {
@@ -182,6 +318,10 @@ pub fn execute_restore(
                 mtime,
                 uid,
                 gid,
+                mode,
+                flags,
+                attributes,
+                acl,
             } => {
                 let full = root.join(path);
                 // Check for symlink in leading path to prevent escape.
@@ -217,7 +357,20 @@ pub fn execute_restore(
                     )));
                 }
                 fs::write(&full, &content)?;
-                apply_metadata(&full, *readonly, *mtime, *uid, *gid);
+                apply_metadata(
+                    &full,
+                    &MetadataToApply {
+                        readonly: *readonly,
+                        mtime: *mtime,
+                        uid: *uid,
+                        gid: *gid,
+                        mode: *mode,
+                        flags: *flags,
+                        attributes: *attributes,
+                        acl: acl.as_deref(),
+                    },
+                    &mut warnings,
+                );
                 files_written += 1;
             }
             RestoreAction::CreateSymlink { path, target } => {
@@ -354,6 +507,10 @@ mod tests {
                 mtime: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             }],
             conflicts: vec![],
             warnings: vec![],
@@ -385,6 +542,10 @@ mod tests {
                 mtime: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             }],
             conflicts: vec![],
             warnings: vec![],
@@ -412,6 +573,10 @@ mod tests {
                     mtime: None,
                     uid: None,
                     gid: None,
+                    mode: None,
+                    flags: None,
+                    attributes: None,
+                    acl: None,
                 },
                 RestoreAction::CreateDir {
                     path: PathBuf::from("a/b"),
@@ -419,6 +584,10 @@ mod tests {
                     mtime: None,
                     uid: None,
                     gid: None,
+                    mode: None,
+                    flags: None,
+                    attributes: None,
+                    acl: None,
                 },
             ],
             conflicts: vec![],
@@ -491,6 +660,10 @@ mod tests {
                 mtime: None,
                 uid: None,
                 gid: None,
+                mode: None,
+                flags: None,
+                attributes: None,
+                acl: None,
             }],
             conflicts: vec![],
             warnings: vec![],

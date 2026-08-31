@@ -44,8 +44,11 @@ See the [CLI usage reference](docs/usage.md) for details.
 
 - Content-addressed storage with SHA-256 hashing and deduplication
 - Symlink scanning and full restoration
-- Hard link detection and restoration (Unix)
-- Permission, mtime, and uid/gid restoration (Unix)
+- Hard link detection and restoration (Unix and Windows/NTFS)
+- Full permission mode restoration (Unix), file attributes (Windows)
+- BSD file flags restoration (macOS: uchg, hidden, ...)
+- Owner/ACL restoration: uid/gid (Unix), security descriptors (Windows)
+- mtime restoration (all platforms)
 - Conflict detection with explicit confirmation
 - Safety checkpoint before restore (undo a bad restore)
 - Idempotent checkpointing (same state = same ID, no duplicates)
