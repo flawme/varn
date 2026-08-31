@@ -4,6 +4,10 @@
 //! Windows attributes/ACLs are exercised by cfg-gated tests in the platform
 //! module and by CI on each OS.
 
+// Everything in this file except the serde round-trip tests is Unix-only;
+// gate the whole file so Windows builds have no unused imports.
+#![cfg(unix)]
+
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
