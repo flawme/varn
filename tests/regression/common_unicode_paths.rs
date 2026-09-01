@@ -65,9 +65,16 @@ fn unicode_names_in_snapshot_json_are_correct() {
 }
 
 #[test]
+#[cfg(not(target_os = "macos"))]
 fn normalization_difference_is_a_different_file() {
     // NFC "café" vs NFD "cafe\u{301}" are different byte sequences and must
     // be treated as different files (no silent folding).
+    //
+    // SKIPPED on macOS: APFS is normalization-insensitive by default — the
+    // filesystem itself folds NFC and NFD to the same name, so two files
+    // that differ only by normalization cannot coexist there. The test
+    // asserts Varn's byte-faithful behavior on normalization-sensitive
+    // filesystems (ext4, NTFS).
     let repo = TestRepo::new();
     let nfc = "caf\u{e9}.txt";
     let nfd = "cafe\u{301}.txt";
