@@ -37,6 +37,7 @@ fn make_writable(path: &std::path::Path) {
     #[cfg(not(unix))]
     {
         let mut perms = fs::metadata(path).unwrap().permissions();
+        #[allow(clippy::set_readonly_false)]
         perms.set_readonly(false);
         fs::set_permissions(path, perms).unwrap();
     }

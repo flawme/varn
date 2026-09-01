@@ -23,6 +23,7 @@ fn unhashable_file_is_skipped_with_warning_not_poisoned() {
     }
 
     let scan = repo.scan_with_ignore();
+    #[cfg_attr(not(unix), allow(unused_variables))]
     let locked_entry = scan
         .entries
         .iter()
@@ -157,6 +158,7 @@ fn cache_never_reuses_hashless_entry_as_empty_string() {
     // The poisoning path: a cache entry with hash:None must not be served
     // back as Some("") on the next scan.
     let repo = TestRepo::new();
+    #[cfg_attr(not(unix), allow(unused_variables))]
     let locked = repo.write("locked.txt", b"data");
     #[cfg(unix)]
     {
