@@ -13,7 +13,6 @@
 
 use crate::common::TestRepo;
 use std::fs;
-use std::path::PathBuf;
 
 /// Create a junction via the `mklink /J` shell builtin.
 fn create_junction(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
