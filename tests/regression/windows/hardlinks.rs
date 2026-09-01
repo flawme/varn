@@ -97,5 +97,3 @@ mod platform_shim {
         }
     }
 }
-
-use platform_shim::set_readonly as varn_platform_shim_set_readonly;

@@ -14,6 +14,7 @@ fn unhashable_file_is_skipped_with_warning_not_poisoned() {
 
     // Make a file unhashable: unreadable permissions (Unix analog of
     // FileShare.None on Windows).
+    #[cfg_attr(not(unix), allow(unused_variables))]
     let locked = repo.write("locked.txt", b"secret");
     #[cfg(unix)]
     {

@@ -3,6 +3,7 @@
 
 use crate::common::TestRepo;
 use std::fs;
+use std::os::windows::fs::MetadataExt;
 
 #[test]
 fn acl_captured_without_nul_padding() {
@@ -128,5 +129,3 @@ mod platform_shim {
         }
     }
 }
-
-use platform_shim::set_attrs as varn_platform_shim_set_attrs;
