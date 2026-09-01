@@ -42,8 +42,8 @@ fn long_total_path_round_trip() {
     // the \\?\ prefix, plain std::fs calls fail beyond that. The report's
     // 902-char case works in the CLI (which users run from their own
     // roots); CI temp dirs are deep, so keep the total modest here.
-    let mut rel = String::new();
-    for _i in 0..4 {
+    let mut rel = "c".repeat(20);
+    for _i in 1..4 {
         rel.push_str(&format!("/{}", "c".repeat(20)));
     }
     rel.push_str("/f.txt");

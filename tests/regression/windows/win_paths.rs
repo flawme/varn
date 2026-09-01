@@ -25,8 +25,8 @@ fn long_path_round_trip_with_extended_prefix() {
     // scanner/restore must handle deep trees. (The report verified 902
     // chars; this pins a deep-but-CI-friendly case.)
     let repo = TestRepo::new();
-    let mut rel = String::new();
-    for i in 0..8 {
+    let mut rel = String::from("level0");
+    for i in 1..8 {
         rel.push_str(&format!("/level{i}"));
     }
     rel.push_str("/deep.txt");

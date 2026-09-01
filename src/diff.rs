@@ -94,7 +94,17 @@ fn entries_equal(old: &TreeEntry, new: &TreeEntry) -> bool {
             && old.meta.hash == new.meta.hash
             && old.meta.target == new.meta.target
     } else {
-        old.meta == new.meta
+        // Compare everything EXCEPT the Windows security descriptor: the
+        // SDDL re-captured from a restored file legitimately differs from
+        // the snapshot's (inherited ACEs are merged and reordered by the
+        // filesystem when the DACL is applied), so a byte-equal comparison
+        // would report every restored file as Modified. ACL drift is
+        // surfaced by restore's best-effort warnings instead.
+        let mut a = old.meta.clone();
+        let mut b = new.meta.clone();
+        a.acl = None;
+        b.acl = None;
+        a == b
     }
 }
 
