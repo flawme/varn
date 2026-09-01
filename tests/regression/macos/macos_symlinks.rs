@@ -12,7 +12,7 @@ fn symlink_round_trip_with_canonicalized_root() {
     // symlinked components (TempDir on macOS IS under /var/...).
     let repo = TestRepo::new();
     repo.write("target.txt", b"content");
-    std::os::unix::fs::symlink(&PathBuf::from("target.txt"), repo.root().join("link.txt")).unwrap();
+    std::os::unix::fs::symlink(PathBuf::from("target.txt"), repo.root().join("link.txt")).unwrap();
 
     let snapshot = repo.checkpoint("macos link");
     fs::remove_file(repo.root().join("link.txt")).unwrap();
