@@ -281,6 +281,25 @@ pub fn set_security_descriptor(path: &Path, sddl: &str) -> std::io::Result<()> {
     if ok == 0 {
         return Err(std::io::Error::last_os_error());
     }
+    // SetNamedSecurityInfoW takes the OWNER PSID, GROUP PSID, and DACL
+    // pointer — NOT the whole security descriptor. Extract the DACL from
+    // the converted descriptor via GetSecurityDescriptorDacl; passing the
+    // SD itself as the PACL fails with ERROR_INVALID_PARAMETER (os 87).
+    let mut dacl: *mut std::ffi::c_void = std::ptr::null_mut();
+    let mut dacl_present: i32 = 0;
+    let mut dacl_defaulted: i32 = 0;
+    let ok_dacl = unsafe {
+        windows_sys::Win32::Security::GetSecurityDescriptorDacl(
+            psd,
+            &mut dacl_present,
+            &mut dacl,
+            &mut dacl_defaulted,
+        )
+    };
+    if ok_dacl == 0 {
+        unsafe { windows_sys::Win32::Foundation::LocalFree(psd as _) };
+        return Err(std::io::Error::last_os_error());
+    }
     let rc = unsafe {
         SetNamedSecurityInfoW(
             path_wide.as_ptr(),
@@ -288,7 +307,7 @@ pub fn set_security_descriptor(path: &Path, sddl: &str) -> std::io::Result<()> {
             OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            psd as *mut _,
+            dacl,
             std::ptr::null_mut(),
         )
     };

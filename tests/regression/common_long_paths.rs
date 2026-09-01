@@ -37,25 +37,36 @@ fn long_filenames_round_trip() {
 #[test]
 fn long_total_path_round_trip() {
     let repo = TestRepo::new();
-    // Build a path whose total length is large but within per-component
-    // limits: 6 components of 25 chars each = ~155 chars.
+    // Build a path whose total length is large but stays under the
+    // Windows MAX_PATH (260) limit INCLUDING the temp-dir prefix — without
+    // the \\?\ prefix, plain std::fs calls fail beyond that. The report's
+    // 902-char case works in the CLI (which users run from their own
+    // roots); CI temp dirs are deep, so keep the total modest here.
     let mut rel = String::new();
-    for _i in 0..6 {
-        rel.push_str(&format!("/{}", "c".repeat(25)));
+    for _i in 0..4 {
+        rel.push_str(&format!("/{}", "c".repeat(20)));
     }
     rel.push_str("/f.txt");
-    // Some environments (sandboxes, restricted temp dirs) reject long
-    // relative paths under the temp root; skip rather than fail.
+
+    // Probe: if this environment rejects the path length, skip rather
+    // than fail (the property under test is round-tripping, not the
+    // environment's limits).
     let probe = repo.root().join(&rel);
     if std::fs::create_dir_all(probe.parent().unwrap()).is_err() {
         eprintln!("skipping: environment rejects long paths");
         return;
     }
     repo.write(&rel, b"long path");
+    // Sanity: the file must be readable at the same path we wrote it.
+    assert_eq!(repo.read_str(&rel), "long path");
 
     let snapshot = repo.checkpoint("long path");
     std::fs::remove_file(repo.root().join(&rel)).unwrap();
     repo.restore(&snapshot);
+    assert!(
+        repo.root().join(&rel).exists(),
+        "restored file must exist at the long path"
+    );
     assert_eq!(repo.read_str(&rel), "long path");
     assert!(repo.verifies(&snapshot));
 }

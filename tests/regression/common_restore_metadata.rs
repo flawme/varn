@@ -144,7 +144,17 @@ fn mtime_failure_is_reported_as_warning_not_silent() {
     }
     #[cfg(not(unix))]
     {
-        let _ = (path, OLD);
+        // Windows: assert the same happy-path properties. (The strict
+        // verify assertion lives in the other mtime tests, which pass on
+        // Windows CI; this test's Windows branch focuses on the warning
+        // pathway.)
+        let result = repo.restore(&snapshot);
+        assert!(
+            result.warnings.iter().all(|w| !w.contains("mtime")),
+            "no mtime warnings on the happy path: {:?}",
+            result.warnings
+        );
+        assert_eq!(get_mtime(&path), Some(OLD));
     }
     assert!(repo.verifies(&snapshot));
 }

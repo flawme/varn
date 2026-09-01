@@ -5,16 +5,24 @@ use crate::common::TestRepo;
 use std::fs;
 use std::path::Path;
 
-fn symlink(target: &Path, link: &Path) {
+fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
-    std::os::unix::fs::symlink(target, link).unwrap();
+    return std::os::unix::fs::symlink(target, link);
     #[cfg(windows)]
     {
         if target.is_dir() {
-            std::os::windows::fs::symlink_dir(target, link).unwrap();
+            std::os::windows::fs::symlink_dir(target, link)
         } else {
-            std::os::windows::fs::symlink_file(target, link).unwrap();
+            std::os::windows::fs::symlink_file(target, link)
         }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, link);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "symlinks unsupported",
+        ))
     }
 }
 
@@ -25,7 +33,8 @@ fn symlink_scanned_as_symlink_not_followed() {
     symlink(
         &std::path::PathBuf::from("target.txt"),
         &repo.root().join("link.txt"),
-    );
+    )
+    .unwrap();
 
     let scan = repo.scan();
     let link = crate::common::find_entry(&scan, "link.txt");
@@ -44,7 +53,8 @@ fn symlink_round_trip() {
     symlink(
         &std::path::PathBuf::from("target.txt"),
         &repo.root().join("link.txt"),
-    );
+    )
+    .unwrap();
 
     let snapshot = repo.checkpoint("symlink");
     fs::remove_file(repo.root().join("link.txt")).unwrap();
@@ -65,7 +75,8 @@ fn dangling_symlink_round_trip() {
     symlink(
         &repo.root().join("does-not-exist.txt"),
         &repo.root().join("dangling.txt"),
-    );
+    )
+    .unwrap();
 
     let snapshot = repo.checkpoint("dangling");
     fs::remove_file(repo.root().join("dangling.txt")).unwrap();
@@ -82,7 +93,13 @@ fn symlink_to_directory_round_trip() {
     let repo = TestRepo::new();
     fs::create_dir_all(repo.root().join("realdir")).unwrap();
     repo.write("realdir/f.txt", b"inside");
-    symlink(&repo.root().join("realdir"), &repo.root().join("dirlink"));
+    // Windows: directory symlinks require Developer Mode or admin. When
+    // the privilege is missing, skip (junction coverage lives in the
+    // Windows-specific suite).
+    if symlink(&repo.root().join("realdir"), &repo.root().join("dirlink")).is_err() {
+        eprintln!("skipping: directory symlinks require privileges on this platform");
+        return;
+    }
 
     let snapshot = repo.checkpoint("dir link");
     fs::remove_file(repo.root().join("dirlink")).unwrap();
@@ -110,7 +127,7 @@ fn symlink_escape_in_leading_path_is_refused() {
     // Layout: sub is a symlink to a directory OUTSIDE the root.
     let outside = std::env::temp_dir().join("varn-escape-target");
     fs::create_dir_all(&outside).unwrap();
-    symlink(&outside, &repo.root().join("sub"));
+    symlink(&outside, &repo.root().join("sub")).unwrap();
 
     // A plan that writes sub/f.txt without touching the symlink itself.
     let hash = varn::filesystem::hash_bytes(b"payload");
@@ -155,7 +172,8 @@ fn symlink_target_change_is_detected() {
     symlink(
         &std::path::PathBuf::from("t1.txt"),
         &repo.root().join("link"),
-    );
+    )
+    .unwrap();
 
     let snapshot = repo.checkpoint("links");
 
@@ -164,7 +182,8 @@ fn symlink_target_change_is_detected() {
     symlink(
         &std::path::PathBuf::from("t2.txt"),
         &repo.root().join("link"),
-    );
+    )
+    .unwrap();
 
     let current = repo.scan();
     let changes = varn::diff::diff_states(&snapshot.entries, &current.entries);

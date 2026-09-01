@@ -179,6 +179,26 @@ impl SnapshotData {
     /// If the file's content has changed since the scan (its hash no longer
     /// matches), an error is returned to prevent storing inconsistent data.
     pub fn store_content_blobs(&self, source_root: &Path, store: &ObjectStore) -> Result<()> {
+        // Path-safety guard applies to EVERY entry, hashless or not: an
+        // absolute or traversing path in a snapshot is hostile regardless
+        // of whether it carries content.
+        for entry in &self.entries {
+            if entry.path.is_absolute()
+                || entry.path.components().any(|c| {
+                    matches!(
+                        c,
+                        std::path::Component::ParentDir
+                            | std::path::Component::RootDir
+                            | std::path::Component::Prefix(_)
+                    )
+                })
+            {
+                return Err(VarnError::InvalidPath(format!(
+                    "unsafe entry path in snapshot: {}",
+                    entry.path.display()
+                )));
+            }
+        }
         for entry in &self.entries {
             if let Some(ref hash) = entry.meta.hash {
                 if store.exists(hash) {
@@ -198,22 +218,6 @@ impl SnapshotData {
                         });
                     }
                     continue;
-                }
-                // Validate the entry path is safe (no traversal outside root).
-                if entry.path.is_absolute()
-                    || entry.path.components().any(|c| {
-                        matches!(
-                            c,
-                            std::path::Component::ParentDir
-                                | std::path::Component::RootDir
-                                | std::path::Component::Prefix(_)
-                        )
-                    })
-                {
-                    return Err(VarnError::InvalidPath(format!(
-                        "unsafe entry path in snapshot: {}",
-                        entry.path.display()
-                    )));
                 }
                 let full_path = source_root.join(&entry.path);
                 let mut file = fs::File::open(&full_path).map_err(|e| {
