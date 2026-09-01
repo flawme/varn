@@ -9,24 +9,20 @@ use crate::common::TestRepo;
 use std::fs;
 
 #[test]
-fn locked_delete_target_aborts_before_any_changes() {
+fn write_protected_delete_target_is_cleared_and_restored() {
+    // A write-protected file is not a lock: restore clears protection
+    // before deleting (that is part of its job). The pre-flight probe
+    // clears protection too, so this restore must SUCCEED.
     let repo = TestRepo::new();
     repo.write("a.txt", b"a");
     repo.write("b.txt", b"b");
 
     let snapshot = repo.checkpoint("two files");
 
-    // Simulate the agent state: a.txt deleted, b.txt made undeletable.
+    // Agent state: a.txt deleted, b.txt write-protected.
     fs::remove_file(repo.root().join("a.txt")).unwrap();
     let b = repo.root().join("b.txt");
     fs::write(&b, b"changed").unwrap();
-
-    // Make b.txt undeletable the portable way: on Windows the readonly
-    // attribute blocks deletion; on Unix a sticky/read-only parent is not
-    // portable, so use the readonly file attribute path (restore's delete
-    // path clears it — but the PRE-FLIGHT probe must fire first for a
-    // genuinely locked file). For a portable probe test, make b.txt
-    // unreadable-unwritable on Unix; the write-probe fails there.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -39,21 +35,10 @@ fn locked_delete_target_aborts_before_any_changes() {
         fs::set_permissions(&b, perms).unwrap();
     }
 
-    // The restore must FAIL (pre-flight) — and a.txt must still be absent
-    // (no partial application: the plan wanted to restore a.txt AND delete
-    // b.txt; the abort must happen before a.txt is written).
-    let plan = repo.plan_restore(&snapshot);
-    let err = varn::restore::execute_restore(&plan, &repo.repo.root, &repo.repo.object_store())
-        .unwrap_err();
-    let msg = err.to_string();
-    assert!(
-        msg.contains("pre-flight") || msg.contains("not writable") || msg.contains("Access"),
-        "expected a pre-flight failure, got: {msg}"
-    );
-    assert!(
-        !repo.root().join("a.txt").exists(),
-        "pre-flight abort must happen BEFORE any filesystem change"
-    );
+    repo.restore(&snapshot);
+    assert_eq!(repo.read_str("a.txt"), "a");
+    assert_eq!(repo.read_str("b.txt"), "b");
+    assert!(repo.verifies(&snapshot));
 
     // Cleanup for temp-dir deletion.
     #[cfg(unix)]
@@ -71,14 +56,14 @@ fn locked_delete_target_aborts_before_any_changes() {
 }
 
 #[test]
-fn locked_overwrite_target_aborts_before_any_changes() {
+fn write_protected_overwrite_target_is_cleared_and_restored() {
     let repo = TestRepo::new();
     repo.write("a.txt", b"a");
     repo.write("b.txt", b"original");
 
     let snapshot = repo.checkpoint("two files");
 
-    // Both files changed; b.txt is unwritable (lock analog).
+    // Both files changed; b.txt write-protected.
     repo.write("a.txt", b"a changed");
     repo.write("b.txt", b"b changed");
     let b = repo.root().join("b.txt");
@@ -94,12 +79,10 @@ fn locked_overwrite_target_aborts_before_any_changes() {
         fs::set_permissions(&b, perms).unwrap();
     }
 
-    let plan = repo.plan_restore(&snapshot);
-    let result = varn::restore::execute_restore(&plan, &repo.repo.root, &repo.repo.object_store());
-    assert!(result.is_err(), "pre-flight must reject the locked target");
-
-    // a.txt must be untouched by the aborted restore.
-    assert_eq!(repo.read_str("a.txt"), "a changed");
+    repo.restore(&snapshot);
+    assert_eq!(repo.read_str("a.txt"), "a");
+    assert_eq!(repo.read_str("b.txt"), "original");
+    assert!(repo.verifies(&snapshot));
 
     #[cfg(unix)]
     {

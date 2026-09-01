@@ -394,8 +394,12 @@ pub fn execute_restore(
             if layout_will_change(plan, path) {
                 continue;
             }
-            if std::env::var("VARN_TRACE").is_ok() {
-                eprintln!("PROBE: {}", full.display());
+            // A write-protected file is not a lock: restore clears
+            // protection before writing (that is part of its job). Clear
+            // it before probing; only a genuine sharing violation or
+            // access denial that survives this blocks the restore.
+            if full.exists() && !full.is_dir() {
+                clear_write_protection(&full);
             }
             if let Err(msg) = probe_writable(&full) {
                 return Err(VarnError::Other(format!(

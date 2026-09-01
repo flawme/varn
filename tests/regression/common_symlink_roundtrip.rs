@@ -102,7 +102,15 @@ fn symlink_to_directory_round_trip() {
     }
 
     let snapshot = repo.checkpoint("dir link");
-    fs::remove_file(repo.root().join("dirlink")).unwrap();
+    // Removing a directory symlink differs by platform: Unix remove_file
+    // unlinks the link itself; Windows directory symlinks are reparse
+    // points that remove_file rejects with Access Denied — remove_dir
+    // removes the link (not the target).
+    let dirlink = repo.root().join("dirlink");
+    #[cfg(unix)]
+    fs::remove_file(&dirlink).unwrap();
+    #[cfg(windows)]
+    fs::remove_dir(&dirlink).unwrap();
     repo.restore(&snapshot);
 
     assert!(repo.root().join("dirlink").is_symlink());

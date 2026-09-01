@@ -300,11 +300,15 @@ pub fn set_security_descriptor(path: &Path, sddl: &str) -> std::io::Result<()> {
         unsafe { windows_sys::Win32::Foundation::LocalFree(psd as _) };
         return Err(std::io::Error::last_os_error());
     }
+    // Only the DACL is applied: the owner/group pointers are null, so the
+    // corresponding flags must NOT be set (a set flag with a null pointer
+    // is ERROR_INVALID_PARAMETER). Owner/group restore via SDDL is future
+    // work once the SDDL round-trip is proven end to end.
     let rc = unsafe {
         SetNamedSecurityInfoW(
             path_wide.as_ptr(),
             SE_FILE_OBJECT,
-            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            DACL_SECURITY_INFORMATION,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             dacl,
