@@ -85,9 +85,22 @@ impl SnapshotData {
             return Ok(false);
         }
         let json = serde_json::to_string_pretty(self)?;
-        let tmp = path.with_extension("json.tmp");
+        // Unique temp name per save: two threads saving the same snapshot
+        // (concurrent checkpoints of identical state) share the target
+        // path; a fixed `.tmp` name would let one thread's rename steal
+        // the other's temp file (ENOENT).
+        static SAVE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = path.with_extension(format!(
+            "json.{}.{}.tmp",
+            std::process::id(),
+            SAVE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         fs::write(&tmp, json)?;
-        fs::rename(&tmp, &path)?;
+        let rename_result = fs::rename(&tmp, &path);
+        if rename_result.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        rename_result?;
         Ok(true)
     }
 
@@ -133,7 +146,14 @@ impl SnapshotData {
                 }
             }
         }
-        snapshots.sort_by_key(|s| s.meta.created_at);
+        // Sort by creation time, then by ID for determinism when multiple
+        // checkpoints share the same second (common with scripted runs).
+        snapshots.sort_by(|a, b| {
+            a.meta
+                .created_at
+                .cmp(&b.meta.created_at)
+                .then_with(|| a.meta.id.0.cmp(&b.meta.id.0))
+        });
         Ok(snapshots)
     }
 
@@ -162,6 +182,21 @@ impl SnapshotData {
         for entry in &self.entries {
             if let Some(ref hash) = entry.meta.hash {
                 if store.exists(hash) {
+                    // The object exists — but the entry's hash may be stale
+                    // (scan-cache reuse for a file rewritten with the same
+                    // size and mtime). Verify the file's actual content hash
+                    // before trusting the object mapping; a mismatch aborts
+                    // the checkpoint rather than storing a wrong-content
+                    // snapshot.
+                    let full_path = source_root.join(&entry.path);
+                    let actual = crate::filesystem::hash_file_path(&full_path)?;
+                    if actual != *hash {
+                        return Err(VarnError::StaleCache {
+                            path: entry.path.display().to_string(),
+                            expected: hash.clone(),
+                            actual,
+                        });
+                    }
                     continue;
                 }
                 // Validate the entry path is safe (no traversal outside root).
@@ -183,7 +218,7 @@ impl SnapshotData {
                 let full_path = source_root.join(&entry.path);
                 let mut file = fs::File::open(&full_path).map_err(|e| {
                     VarnError::Other(format!(
-                        "cannot read file for storage: {}: {e}",
+                        "cannot read file for storage (open): {}: {e}",
                         full_path.display()
                     ))
                 })?;

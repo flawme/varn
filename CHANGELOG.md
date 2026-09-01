@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-01
+
+### Added
+
+- **Comprehensive regression suite** — a dedicated `tests/regression/` tree
+  organized by platform (`common/`, `windows/`, `macos/`, `linux/`), with
+  135+ named tests covering every bug from the 0.2.0/0.2.1 field reports
+  plus storage, diff, GC, ignore, git-coexistence, unicode, long-path,
+  special-filename, symlink, hard-link, and safety-checkpoint contracts.
+  Platform suites are cfg-gated so each OS runs its own.
+- **Concurrency hardening** — the regression suite exposed two real
+  race conditions, both fixed: the object store's temp file was named by
+  PID only (two threads checkpointing concurrently collided on the same
+  `.tmp` path, one rename stealing the other's file), and the scan-cache
+  and snapshot saves had the same flaw. All atomic temp names are now
+  unique per write (PID + monotonic counter), and failed renames clean up
+  their temp files.
+- **Layout-aware pre-flight probe** — restore's writability probe now
+  skips paths whose surrounding layout the plan itself will change
+  (file replaced by directory or vice versa), instead of rejecting a
+  restore that would succeed.
+- **Delete tolerates vanished parents** — deleting an entry whose parent
+  directory was already removed by an earlier plan action (`ENOTDIR`) is
+  treated as already-deleted, not an error.
+- **Junction behavior pinned (Windows)** — NTFS junctions are captured as
+  symlinks and never followed (the scanner records the link, not the
+  target's subtree; a junction pointing outside the root cannot cause
+  escape). Full reparse-tag classification is future work (FUTURE.md).
+
+### Changed
+
+- Test suite grew from ~306 to 442 tests; `tests/regression/` is the
+  canonical home for field-report regressions, one named file per bug.
+
+## [0.2.1] - 2026-09-01
+
+Fixed from the v0.2.0 Windows field report (all cross-platform unless noted).
+
+### Fixed
+
+- **Stale scan cache produced wrong-content checkpoints (critical)** — the
+  cache keyed on `(size, mtime-seconds)`; two same-size writes within one
+  second (trivially common on NTFS) reused the first content's hash, and the
+  object store's exists-check silently accepted it. Restore then returned
+  the OLD content while verification passed. The cache now keys on
+  sub-second mtime, and `checkpoint` self-heals: if a stored hash does not
+  match the file's actual content, the cache is discarded and the scan is
+  retried so the checkpoint captures the current content.
+- **Read-only files broke every re-restore (Windows)** — restore now clears
+  the read-only/hidden/system attributes (and Unix write-protect bits)
+  before overwriting or deleting, then re-applies the checkpoint's
+  attributes afterwards.
+- **mtime restore failures were silent** — `SetFileTime` on a read-only
+  file failed and the error was swallowed, so verification reported a false
+  failure. mtime is now applied BEFORE protection attributes and failures
+  are reported as warnings.
+- **Checkpoint IDs were not deterministic** — the ID hashed the creation
+  timestamp, so checkpointing an unchanged state twice produced two IDs,
+  silently breaking the documented idempotency contract. The ID is now a
+  pure function of description + root + filesystem state (including
+  permissions/ownership/platform metadata), and metadata-only changes now
+  produce a new checkpoint instead of being silently dropped.
+- **Unhashable files poisoned checkpoints** — a file locked during hashing
+  was recorded with an empty hash and could never be restored, failing
+  verification forever. Restore now skips such entries with a warning and
+  verification tolerates their absence.
+- **`.git/` internals were checkpointed** — the scanner now skips `.git/`
+  at any depth, like `.varn/`.
+- **Windows security descriptor restore always failed (os error 87)** —
+  the stored SDDL string included NUL padding (length-in-chars bug);
+  capture now trims it and restore strips any NULs from older snapshots.
+- **Restore was not transactional under file locks** — a file locked by
+  another process aborted the restore mid-way, leaving a partial tree.
+  Restore now pre-flights every overwrite/delete target for writability
+  and aborts before touching anything.
+- **Ignore-rule changes caused phantom diffs and bad restores** — `diff`
+  and `restore` now scan without the current `.varnignore`, treating the
+  checkpoint as a self-contained state under its own rules.
+- **`migrate` accepted newer repositories** — a repository written by a
+  newer Varn now errors with an upgrade hint instead of "already at
+  version N (current)".
+- **`list` ordering** — deterministic secondary sort by ID when
+  checkpoints share the same second.
+- **Path display** — `init` no longer prints `C:\proj\.` (canonicalized).
+
 ## [0.2.0] - 2026-08-31
 
 ### Added

@@ -55,7 +55,10 @@ pub fn absolutize(path: &PathBuf) -> Result<PathBuf> {
     }
     let cwd = std::env::current_dir()
         .map_err(|e| VarnError::Other(format!("could not determine current directory: {e}")))?;
-    Ok(cwd.join(path))
+    let joined = cwd.join(path);
+    // Canonicalize so display output does not contain `.` components
+    // (e.g. `C:\proj\.`) or `..` remnants.
+    Ok(joined.canonicalize().unwrap_or(joined))
 }
 
 #[cfg(test)]

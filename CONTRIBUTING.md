@@ -101,3 +101,17 @@ Fixes #42
 3. Ensure all four checks pass (fmt, clippy, test, build).
 4. Write a clear PR description explaining what changed and why.
 5. Keep PRs focused — one feature or fix per PR when possible.
+
+## Regression tests
+
+When you fix a bug, add a named regression test under
+`tests/regression/` before moving on:
+
+- Cross-platform bug: `tests/regression/common_<topic>.rs`
+- Windows-only: `tests/regression/windows/<topic>.rs`
+- macOS-only: `tests/regression/macos/<topic>.rs`
+- Linux-only: `tests/regression/linux/<topic>.rs`
+
+The test should reproduce the original failure (verify it fails without
+the fix) and pin the corrected behavior. Name the test after the behavior,
+not the bug number, and include a comment describing the failure mode.

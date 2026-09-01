@@ -14,6 +14,10 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Content-addressed object storage.
+/// Monotonic counter distinguishing concurrent temp-file writes within
+/// one process (the PID alone is shared by all threads).
+static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub struct ObjectStore {
     /// The root directory for object storage (`.varn/objects/`).
     dir: PathBuf,
@@ -78,8 +82,16 @@ impl ObjectStore {
         // Stream to a temp file while hashing.
         // Use a unique temp file name to prevent symlink-based temp file
         // attacks (CVE-2023-34034 pattern: predictable temp file names allow
-        // pre-creating a symlink that redirects the write).
-        let tmp = obj_path.with_extension(format!("{}.tmp", std::process::id()));
+        // pre-creating a symlink that redirects the write). The name must
+        // be unique per WRITE, not per process: two threads checkpointing
+        // concurrently share the PID and would otherwise collide on the
+        // same temp path (one renames it away, the other's rename fails
+        // with ENOENT).
+        let tmp = obj_path.with_extension(format!(
+            "{}.{}.tmp",
+            std::process::id(),
+            TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         let mut file = fs::File::create(&tmp)?;
         let mut hasher = Sha256::new();
         let mut buf = [0u8; 65536]; // 64KB buffer

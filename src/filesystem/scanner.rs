@@ -99,14 +99,20 @@ impl Scanner {
     pub fn scan(&self) -> Result<ScanResult> {
         let mut entries = Vec::new();
         let mut warnings = Vec::new();
-        self.scan_dir(&self.root.clone(), &mut entries, &mut warnings)?;
+        // The updated cache is populated during the walk so each entry's
+        // sub-second mtime is recorded (whole-second mtime is not a
+        // sufficient cache key on high-resolution filesystems).
+        let mut updated_cache = ScanCache::new();
+        self.scan_dir(
+            &self.root.clone(),
+            &mut entries,
+            &mut warnings,
+            &mut updated_cache,
+        )?;
         entries.sort_by(|a, b| a.path.cmp(&b.path));
 
         // Detect hard links and populate hardlink_to fields.
         detect_hard_links(&mut entries);
-
-        // Build an updated cache from the scan results.
-        let updated_cache = ScanCache::from_entries(&entries);
 
         Ok(ScanResult {
             entries,
@@ -121,6 +127,7 @@ impl Scanner {
         dir: &Path,
         entries: &mut Vec<TreeEntry>,
         warnings: &mut Vec<ScanWarning>,
+        updated_cache: &mut ScanCache,
     ) -> Result<()> {
         let read = match fs::read_dir(dir) {
             Ok(r) => r,
@@ -153,6 +160,17 @@ impl Scanner {
             // This prevents checkpointing nested .varn directories (e.g. from
             // a subdirectory that was separately initialized).
             if name == std::ffi::OsStr::new(VARN_DIR) {
+                continue;
+            }
+
+            // Skip .git directories at any depth. Git internals (objects,
+            // packs, refs, hooks) are Git's own state, not the user's
+            // working state; hashing them wastes the object store and slows
+            // every checkpoint. A user who genuinely wants Git internals in
+            // a checkpoint can re-include via .varnignore negation is NOT
+            // possible here (directory skip is unconditional) — documented
+            // behavior, matching how .varn/ is treated.
+            if name == std::ffi::OsStr::new(".git") {
                 continue;
             }
 
@@ -190,10 +208,14 @@ impl Scanner {
             }
 
             let mtime = mtime_to_unix(&meta);
+            let nanos = mtime_nanos(&meta);
 
             let hash = if kind == EntryKind::File {
-                // Try the cache first: if size and mtime match, reuse the hash.
-                if let Some(cached_hash) = self.cache.cached_hash(&rel_str, meta.len(), mtime) {
+                // Try the cache first: if size and mtime (including the
+                // sub-second part) match, reuse the hash.
+                if let Some(cached_hash) =
+                    self.cache.cached_hash(&rel_str, meta.len(), mtime, nanos)
+                {
                     Some(cached_hash.to_string())
                 } else {
                     match self.hash_file(&full) {
@@ -247,9 +269,25 @@ impl Scanner {
                 },
             });
 
+            // Record the entry in the updated cache with sub-second mtime
+            // precision so the next scan can safely reuse the hash.
+            if kind == EntryKind::File {
+                if let Some(ref h) = entries.last().unwrap().meta.hash {
+                    updated_cache.insert(
+                        &rel_str,
+                        crate::filesystem::CachedEntry {
+                            size: meta.len(),
+                            mtime,
+                            mtime_nanos: nanos,
+                            hash: Some(h.clone()),
+                        },
+                    );
+                }
+            }
+
             // Recurse into directories.
             if kind == EntryKind::Directory {
-                self.scan_dir(&full, entries, warnings)?;
+                self.scan_dir(&full, entries, warnings, updated_cache)?;
             }
         }
 
@@ -258,18 +296,7 @@ impl Scanner {
 
     /// Compute the SHA-256 hash of a file's contents as a hex string.
     fn hash_file(&self, path: &Path) -> Result<String> {
-        let mut file = fs::File::open(path)?;
-        let mut hasher = Sha256::new();
-        let mut buf = [0u8; 8192];
-        loop {
-            let n = file.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-        }
-        let digest = hasher.finalize();
-        Ok(format!("{digest:x}"))
+        hash_file_path(path)
     }
 
     /// Compute the path of `full` relative to the scan root, using forward
@@ -289,6 +316,19 @@ fn mtime_to_unix(meta: &fs::Metadata) -> Option<i64> {
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// Extract the sub-second part of the modification time in nanoseconds.
+///
+/// Used as part of the scan-cache key: whole-second mtime is not a
+/// sufficient cache key on high-resolution filesystems (NTFS 100 ns), where
+/// two same-size writes within one second would otherwise collide and reuse
+/// a stale hash.
+fn mtime_nanos(meta: &fs::Metadata) -> Option<u32> {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.subsec_nanos())
 }
 
 /// Get the number of hard links to a file.
@@ -532,6 +572,25 @@ fn hash_to_u64(hash: &str) -> u64 {
     u64::from_str_radix(prefix, 16).unwrap_or(0)
 }
 
+/// Compute the SHA-256 hash of a file's contents as a hex string.
+///
+/// Free function so other modules (snapshot storage verification) can hash
+/// a file without a `Scanner` instance.
+pub fn hash_file_path(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize();
+    Ok(format!("{digest:x}"))
+}
+
 /// Compute the SHA-256 hash of a byte slice as a hex string.
 ///
 /// This is a public utility for testing and verification.
@@ -607,6 +666,23 @@ mod tests {
             .map(|e| e.path.to_string_lossy().replace('\\', "/"))
             .collect();
         assert!(paths.iter().all(|p| !p.starts_with(".varn")));
+        assert_eq!(paths, vec!["real.txt"]);
+    }
+
+    #[test]
+    fn scanner_skips_git_directory() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join(".git/objects")).unwrap();
+        fs::create_dir_all(tmp.path().join(".git/hooks")).unwrap();
+        fs::write(tmp.path().join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(tmp.path().join(".git/hooks/sample"), b"#!/bin/sh\n").unwrap();
+        fs::write(tmp.path().join("real.txt"), b"real").unwrap();
+        let result = Scanner::new(tmp.path()).scan().unwrap();
+        let paths: Vec<_> = result
+            .entries
+            .iter()
+            .map(|e| e.path.to_string_lossy().replace('\\', "/"))
+            .collect();
         assert_eq!(paths, vec!["real.txt"]);
     }
 

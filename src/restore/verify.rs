@@ -19,8 +19,16 @@ pub fn verify_restore(root: &Path, snapshot: &[TreeEntry]) -> bool {
         Err(_) => return false,
     };
 
-    // Compare entry counts.
-    if scan_result.entries.len() != snapshot.len() {
+    // Compare entry counts. Hashless snapshot entries (unhashable at
+    // checkpoint time — e.g. locked) are exempt: restore skips them with a
+    // warning, so the disk legitimately has fewer entries.
+    let hashless = snapshot
+        .iter()
+        .filter(|e| {
+            e.meta.kind == EntryKind::File && e.meta.hash.as_deref().is_none_or(str::is_empty)
+        })
+        .count();
+    if scan_result.entries.len() + hashless != snapshot.len() {
         return false;
     }
 
@@ -36,8 +44,17 @@ pub fn verify_restore(root: &Path, snapshot: &[TreeEntry]) -> bool {
                 if entry.meta.kind != snap_entry.meta.kind {
                     return false;
                 }
-                // For files, compare hash.
-                if entry.meta.kind == EntryKind::File && entry.meta.hash != snap_entry.meta.hash {
+                // For files, compare hash. Entries with an empty snapshot
+                // hash (unhashable at checkpoint time) are exempt: they were
+                // never captured, so the file on disk legitimately differs.
+                if entry.meta.kind == EntryKind::File
+                    && snap_entry
+                        .meta
+                        .hash
+                        .as_deref()
+                        .is_some_and(|h| !h.is_empty())
+                    && entry.meta.hash != snap_entry.meta.hash
+                {
                     return false;
                 }
                 // For symlinks, compare target.

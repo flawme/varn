@@ -10,11 +10,15 @@ use sha2::{Digest, Sha256};
 /// serialized snapshot data (without the ID field, which is set after).
 pub fn generate_checkpoint_id(meta: &CheckpointMeta, entries: &[TreeEntry]) -> String {
     let mut hasher = Sha256::new();
-    // Hash the description, timestamp, and root for uniqueness.
+    // Hash the description and root. NOT the timestamp: the ID must be a
+    // pure function of (description, root, filesystem state) so that
+    // checkpointing an unchanged state twice is a no-op (idempotency
+    // contract). A timestamp in the hash made every checkpoint unique and
+    // silently broke that contract.
     hasher.update(meta.description.as_bytes());
-    hasher.update(meta.created_at.to_le_bytes());
     hasher.update(meta.root.to_string_lossy().as_bytes());
-    // Hash each entry's path and metadata.
+    // Hash each entry's path and metadata. Entries are sorted by path
+    // before this function is called (SnapshotData::new).
     for entry in entries {
         hasher.update(entry.path.to_string_lossy().as_bytes());
         hasher.update(entry.meta.hash.as_deref().unwrap_or("").as_bytes());
@@ -28,6 +32,29 @@ pub fn generate_checkpoint_id(meta: &CheckpointMeta, entries: &[TreeEntry]) -> S
         // Include symlink target so different targets produce different IDs.
         if let Some(ref target) = entry.meta.target {
             hasher.update(target.to_string_lossy().as_bytes());
+        }
+        // Include the metadata the restore engine acts on, so two states
+        // differing only in permissions/ownership/platform metadata get
+        // different IDs (otherwise the second checkpoint would be a no-op
+        // and the metadata drift would never be captured).
+        hasher.update([u8::from(entry.meta.readonly)]);
+        if let Some(m) = entry.meta.mtime {
+            hasher.update(m.to_le_bytes());
+        }
+        if let Some(ref hl) = entry.meta.hardlink_to {
+            hasher.update(hl.to_string_lossy().as_bytes());
+        }
+        if let Some(m) = entry.meta.mode {
+            hasher.update(m.to_le_bytes());
+        }
+        if let Some(f) = entry.meta.flags {
+            hasher.update(f.to_le_bytes());
+        }
+        if let Some(a) = entry.meta.attributes {
+            hasher.update(a.to_le_bytes());
+        }
+        if let Some(ref s) = entry.meta.acl {
+            hasher.update(s.as_bytes());
         }
     }
     let digest = hasher.finalize();

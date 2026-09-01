@@ -224,7 +224,15 @@ pub fn get_security_descriptor_sddl(path: &Path) -> Option<String> {
     };
     let result = if ok != 0 && !sddl_ptr.is_null() {
         let slice = unsafe { std::slice::from_raw_parts(sddl_ptr, sddl_len as usize) };
-        Some(String::from_utf16_lossy(slice))
+        // sddl_len INCLUDES the null terminator. Trim trailing NULs so the
+        // stored SDDL string is clean; a padded string made every
+        // SetNamedSecurityInfoW call fail with ERROR_INVALID_PARAMETER
+        // (os error 87) and ACLs were never restored.
+        let trimmed: &[u16] = match slice.iter().rposition(|&c| c != 0) {
+            Some(last) => &slice[..=last],
+            None => &[],
+        };
+        Some(String::from_utf16_lossy(trimmed))
     } else {
         None
     };

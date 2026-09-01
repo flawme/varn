@@ -27,6 +27,15 @@ pub struct CachedEntry {
     pub size: u64,
     /// Modification time (unix seconds), if available.
     pub mtime: Option<i64>,
+    /// Modification time sub-second part in nanoseconds, if available.
+    ///
+    /// Whole-second mtime is not a sufficient cache key: on NTFS (100 ns
+    /// resolution) two same-size writes within the same second produce
+    /// identical `(size, mtime)` keys, and the cached hash of the first
+    /// content would be reused for the second — silent wrong-content
+    /// checkpoints. The nanos field disambiguates those writes.
+    #[serde(default)]
+    pub mtime_nanos: Option<u32>,
     /// Content hash (SHA-256 hex), if available.
     pub hash: Option<String>,
 }
@@ -58,12 +67,15 @@ pub struct ScanCache {
 }
 
 /// The current cache format version. Bump to invalidate all existing caches.
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 impl ScanCache {
-    /// Create an empty cache.
+    /// Create an empty cache at the current format version.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            version: CACHE_VERSION,
+            ..Self::default()
+        }
     }
 
     /// Load a cache from a JSON file. Returns an empty cache if the file
@@ -84,15 +96,29 @@ impl ScanCache {
     }
 
     /// Save the cache to a JSON file.
+    ///
+    /// The temp file name is unique per save: two threads checkpointing
+    /// concurrently share the target path, and a shared `.tmp` name would
+    /// let one thread's rename steal the other's temp file (ENOENT).
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(self)?;
-        // Atomic write: temp file then rename.
-        let tmp = path.with_extension("json.tmp");
+        // Atomic write: unique temp file then rename.
+        static SAVE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = path.with_extension(format!(
+            "json.{}.{}.tmp",
+            std::process::id(),
+            SAVE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         fs::write(&tmp, json)?;
-        fs::rename(&tmp, path)?;
+        let rename_result = fs::rename(&tmp, path);
+        if rename_result.is_err() {
+            // Never leave the temp file behind.
+            let _ = fs::remove_file(&tmp);
+        }
+        rename_result?;
         Ok(())
     }
 
@@ -132,6 +158,7 @@ impl ScanCache {
                 CachedEntry {
                     size: entry.meta.size,
                     mtime: entry.meta.mtime,
+                    mtime_nanos: None,
                     hash: entry.meta.hash.clone(),
                 },
             );
@@ -139,19 +166,39 @@ impl ScanCache {
         cache
     }
 
-    /// Check whether a file's cached metadata is still valid (size and
-    /// mtime match the current values).
-    pub fn is_valid(&self, path: &str, size: u64, mtime: Option<i64>) -> bool {
+    /// Check whether a file's cached metadata is still valid (size, mtime,
+    /// and sub-second mtime match the current values).
+    pub fn is_valid(
+        &self,
+        path: &str,
+        size: u64,
+        mtime: Option<i64>,
+        mtime_nanos: Option<u32>,
+    ) -> bool {
         match self.get(path) {
-            Some(cached) => cached.size == size && cached.mtime == mtime,
+            Some(cached) => {
+                cached.size == size && cached.mtime == mtime && cached.mtime_nanos == mtime_nanos
+            }
             None => false,
         }
     }
 
     /// Get the cached hash for a file if the cache is still valid.
-    pub fn cached_hash(&self, path: &str, size: u64, mtime: Option<i64>) -> Option<&str> {
-        if self.is_valid(path, size, mtime) {
-            self.get(path).and_then(|e| e.hash.as_deref())
+    pub fn cached_hash(
+        &self,
+        path: &str,
+        size: u64,
+        mtime: Option<i64>,
+        mtime_nanos: Option<u32>,
+    ) -> Option<&str> {
+        if self.is_valid(path, size, mtime, mtime_nanos) {
+            // Only reuse a non-empty hash. An entry with hash: None (the
+            // file could not be hashed last time — e.g. locked) must force
+            // a re-hash; reusing it as Some("") would poison the snapshot
+            // with a hashless entry that can never be restored.
+            self.get(path)
+                .and_then(|e| e.hash.as_deref())
+                .filter(|h| !h.is_empty())
         } else {
             None
         }
@@ -202,6 +249,7 @@ mod tests {
             CachedEntry {
                 size: 100,
                 mtime: Some(1000),
+                mtime_nanos: None,
                 hash: Some("abc123".to_string()),
             },
         );
@@ -220,17 +268,18 @@ mod tests {
             CachedEntry {
                 size: 50,
                 mtime: Some(1000),
+                mtime_nanos: None,
                 hash: Some("hash".to_string()),
             },
         );
         // Valid: same size and mtime.
-        assert!(cache.is_valid("a.txt", 50, Some(1000)));
+        assert!(cache.is_valid("a.txt", 50, Some(1000), None));
         // Invalid: different size.
-        assert!(!cache.is_valid("a.txt", 51, Some(1000)));
+        assert!(!cache.is_valid("a.txt", 51, Some(1000), None));
         // Invalid: different mtime.
-        assert!(!cache.is_valid("a.txt", 50, Some(2000)));
+        assert!(!cache.is_valid("a.txt", 50, Some(2000), None));
         // Invalid: not in cache.
-        assert!(!cache.is_valid("b.txt", 50, Some(1000)));
+        assert!(!cache.is_valid("b.txt", 50, Some(1000), None));
     }
 
     #[test]
@@ -241,13 +290,17 @@ mod tests {
             CachedEntry {
                 size: 50,
                 mtime: Some(1000),
+                mtime_nanos: None,
                 hash: Some("hash123".to_string()),
             },
         );
         // Valid cache: returns hash.
-        assert_eq!(cache.cached_hash("a.txt", 50, Some(1000)), Some("hash123"));
+        assert_eq!(
+            cache.cached_hash("a.txt", 50, Some(1000), None),
+            Some("hash123")
+        );
         // Invalid cache: returns None.
-        assert_eq!(cache.cached_hash("a.txt", 51, Some(1000)), None);
+        assert_eq!(cache.cached_hash("a.txt", 51, Some(1000), None), None);
     }
 
     #[test]
@@ -258,8 +311,14 @@ mod tests {
         ];
         let cache = ScanCache::from_entries(&entries);
         assert_eq!(cache.len(), 2);
-        assert_eq!(cache.cached_hash("a.txt", 10, Some(1000)), Some("hash_a"));
-        assert_eq!(cache.cached_hash("b.txt", 20, Some(2000)), Some("hash_b"));
+        assert_eq!(
+            cache.cached_hash("a.txt", 10, Some(1000), None),
+            Some("hash_a")
+        );
+        assert_eq!(
+            cache.cached_hash("b.txt", 20, Some(2000), None),
+            Some("hash_b")
+        );
     }
 
     #[test]
@@ -273,6 +332,7 @@ mod tests {
             CachedEntry {
                 size: 10,
                 mtime: Some(1000),
+                mtime_nanos: None,
                 hash: Some("hash".to_string()),
             },
         );
@@ -304,6 +364,7 @@ mod tests {
             CachedEntry {
                 size: 10,
                 mtime: Some(1000),
+                mtime_nanos: None,
                 hash: Some("hash".to_string()),
             },
         );

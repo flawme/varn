@@ -86,6 +86,25 @@ cargo test
 cargo build --release
 ```
 
+### Regression tests
+
+`tests/regression/` is the canonical home for field-report regressions,
+organized by platform so every bug from every OS has a permanent, named
+test:
+
+```text
+tests/regression/
+├── main.rs        # suite root
+├── common/        # cross-platform helpers
+├── common_*.rs    # cross-platform bugs (cache, IDs, restore, storage, ...)
+├── windows/       # Windows-only (attributes, ACLs, hard links, junctions)
+├── macos/         # macOS-only (BSD flags, symlinked temp dirs)
+└── linux/         # Linux-only (mode bits, uid/gid, POSIX locks/symlinks)
+```
+
+When fixing a bug, add a named regression test here first — it documents
+the failure and prevents it from ever coming back.
+
 ## License
 
 MIT OR Apache-2.0

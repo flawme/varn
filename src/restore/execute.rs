@@ -41,6 +41,95 @@ fn has_symlink_in_leading_path(root: &Path, full: &Path) -> bool {
     false
 }
 
+/// Clear write-protection on a path so it can be overwritten or deleted.
+///
+/// Windows refuses to open a read-only file for writing and refuses to
+/// delete one; Unix refuses to write into a read-only file. Restore must
+/// clear the protection first, then re-apply the snapshot's attributes
+/// afterwards (apply_metadata does that).
+fn clear_write_protection(path: &Path) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if let Ok(meta) = fs::symlink_metadata(path) {
+            let attrs = meta.file_attributes();
+            const FILE_ATTRIBUTE_READONLY: u32 = 0x1;
+            const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+            const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
+            if attrs & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)
+                != 0
+            {
+                let _ = crate::platform::set_file_attributes(
+                    path,
+                    attrs
+                        & !(FILE_ATTRIBUTE_READONLY
+                            | FILE_ATTRIBUTE_HIDDEN
+                            | FILE_ATTRIBUTE_SYSTEM),
+                );
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::symlink_metadata(path) {
+            let mode = meta.permissions().mode();
+            // Owner write bit cleared, or not the owner: attempt to add
+            // write permission for the owner; ignore errors (best-effort).
+            if mode & 0o200 == 0 {
+                if let Ok(meta) = fs::metadata(path) {
+                    let mut perms = meta.permissions();
+                    perms.set_mode(mode | 0o200);
+                    let _ = fs::set_permissions(path, perms);
+                }
+            }
+        }
+    }
+}
+
+/// Whether some parent component of `path` is scheduled to change kind
+/// (directory replaced by file or vice versa) by the plan.
+///
+/// When the layout around a path changes during the restore, probing the
+/// path's writability up front is meaningless — the probe would hit a
+/// stale layout (e.g. ENOTDIR) and reject a restore that would succeed.
+fn layout_will_change(plan: &RestorePlan, path: &Path) -> bool {
+    plan.actions.iter().any(|a| match a {
+        RestoreAction::Delete { path: p } => path.starts_with(p) || p.starts_with(path),
+        _ => false,
+    })
+}
+
+/// Probe whether a path can be written or deleted.
+///
+/// Returns `Err` with an actionable message when the path exists but is
+/// locked by another process (Windows: sharing violation; Unix: permission
+/// or mandatory lock). Used by the pre-flight check so a locked file aborts
+/// the restore BEFORE any changes are made, instead of leaving a partial
+/// tree behind.
+fn probe_writable(path: &Path) -> std::result::Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    // Opening for write access detects sharing violations and permission
+    // problems without modifying the file. Directories cannot be opened
+    // this way; their deletability is checked via the parent.
+    if path.is_dir() {
+        return Ok(());
+    }
+    match fs::OpenOptions::new().write(true).open(path) {
+        Ok(_) => Ok(()),
+        // NotADirectory means a parent path component is currently a file
+        // but will be replaced by a directory earlier in the plan — not a
+        // lock. Only genuine access/sharing problems block the restore.
+        Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => Ok(()),
+        Err(e) => Err(format!(
+            "{} is not writable (locked by another process or access denied): {e}",
+            path.display()
+        )),
+    }
+}
+
 /// Captured metadata to apply to a restored entry, independent of platform.
 ///
 /// Fields that do not apply to the current platform are `None` and ignored.
@@ -181,7 +270,23 @@ fn apply_metadata(path: &Path, meta: &MetadataToApply, warnings: &mut Vec<String
         let _ = acl;
     }
 
+    // Modification time. Applied BEFORE read-only protection: Windows
+    // refuses SetFileTime on a read-only file, so setting the attribute
+    // first would leave the mtime unrestored (and verification would
+    // report a false failure). Failures are warnings, not silent.
+    if let Some(ts) = mtime {
+        if let Err(e) = filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(ts, 0)) {
+            warnings.push(format!(
+                "cannot restore mtime {} on {}: {}",
+                ts,
+                path.display(),
+                e
+            ));
+        }
+    }
+
     // Windows file attributes (READONLY, HIDDEN, SYSTEM, ARCHIVE, ...).
+    // Applied LAST so protection does not block mtime/ACL steps above.
     #[cfg(windows)]
     {
         if let Some(attrs) = attributes {
@@ -204,10 +309,6 @@ fn apply_metadata(path: &Path, meta: &MetadataToApply, warnings: &mut Vec<String
     #[cfg(not(windows))]
     {
         let _ = (attributes, readonly);
-    }
-
-    if let Some(ts) = mtime {
-        let _ = filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(ts, 0));
     }
 }
 
@@ -274,6 +375,37 @@ pub fn execute_restore(
         }
     }
 
+    // Pre-flight lock probe: every file that would be overwritten or
+    // deleted must be writable NOW, or the restore aborts before touching
+    // anything. Without this, a file locked by another process (editor,
+    // indexer, antivirus) aborts mid-restore and leaves a partial tree.
+    for action in &plan.actions {
+        let target = match action {
+            RestoreAction::WriteFile { path, .. } => Some(path),
+            RestoreAction::Delete { path } => Some(path),
+            _ => None,
+        };
+        if let Some(path) = target {
+            let full = root.join(path);
+            // Skip the probe when a parent path component is currently a
+            // directory that the plan will replace with a file (or vice
+            // versa): the layout changes before this action runs, so the
+            // probe's result would be meaningless.
+            if layout_will_change(plan, path) {
+                continue;
+            }
+            if std::env::var("VARN_TRACE").is_ok() {
+                eprintln!("PROBE: {}", full.display());
+            }
+            if let Err(msg) = probe_writable(&full) {
+                return Err(VarnError::Other(format!(
+                    "pre-flight check failed: {msg} — no changes were made; \
+                     close the program using the file and retry"
+                )));
+            }
+        }
+    }
+
     // Execute the actions. ApplyDirMeta actions (which sort last in the
     // plan) are deferred to a second pass below: they must run after every
     // child operation because child operations update the parent
@@ -284,6 +416,9 @@ pub fn execute_restore(
         if let RestoreAction::ApplyDirMeta { .. } = action {
             dir_meta_actions.push(action);
             continue;
+        }
+        if std::env::var("VARN_TRACE").is_ok() {
+            eprintln!("EXEC: {action:?}");
         }
         match action {
             RestoreAction::CreateDir {
@@ -367,6 +502,12 @@ pub fn execute_restore(
                         actual_hash
                     )));
                 }
+                // Clear write-protection first: Windows refuses to open a
+                // read-only file for writing (os error 5), which made every
+                // re-restore of a checkpoint containing read-only files fail.
+                if full.exists() {
+                    clear_write_protection(&full);
+                }
                 fs::write(&full, &content)?;
                 apply_metadata(
                     &full,
@@ -393,6 +534,7 @@ pub fn execute_restore(
                 // If something already exists at this path, remove it first.
                 // (This can happen for replace-delete + create sequences.)
                 if full.exists() || fs::symlink_metadata(&full).is_ok() {
+                    clear_write_protection(&full);
                     let meta = fs::symlink_metadata(&full)?;
                     if meta.is_dir() {
                         fs::remove_dir_all(&full)?;
@@ -469,13 +611,21 @@ pub fn execute_restore(
                 let full = root.join(path);
                 let meta = match fs::symlink_metadata(&full) {
                     Ok(m) => m,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        // File already gone — not an error.
+                    // Already gone, or the parent directory is already gone
+                    // (removed by an earlier Delete of a parent directory):
+                    // both mean the entry is already deleted — not an error.
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::NotFound
+                            || e.kind() == std::io::ErrorKind::NotADirectory =>
+                    {
                         warnings.push(format!("file already deleted: {}", path.display()));
                         continue;
                     }
                     Err(e) => return Err(VarnError::Io(e)),
                 };
+                // Clear write-protection before deleting (Windows refuses
+                // to delete read-only files).
+                clear_write_protection(&full);
                 if meta.is_dir() {
                     fs::remove_dir_all(&full)?;
                 } else {
@@ -490,6 +640,9 @@ pub fn execute_restore(
     // Directory metadata pass: deepest first (plan sorted by depth
     // ascending; reverse visitation applies deepest last-planned first).
     for action in dir_meta_actions.into_iter().rev() {
+        if std::env::var("VARN_TRACE").is_ok() {
+            eprintln!("DIRMETA: {action:?}");
+        }
         if let RestoreAction::ApplyDirMeta {
             path,
             readonly,

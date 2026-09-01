@@ -29,6 +29,13 @@ Planned features and known limitations not yet in Varn.
   Varn reads `.varnignore` for ignore patterns but does not automatically
   respect `.gitignore` files. This may be added as an opt-in flag.
 
+- **Junctions recorded as symlinks (Windows)**
+  NTFS junctions are captured as `EntryKind::Symlink` with their target,
+  and are never followed by the scanner (a junction pointing outside the
+  root cannot cause escape). Distinguishing junctions from symlinks via
+  reparse tags — and restoring junctions as junctions rather than
+  symlinks — is future work.
+
 - **Windows hard links require same volume**
   Hard link restoration on Windows falls back to an independent copy when
   the primary file and the link land on different volumes (NTFS hard links

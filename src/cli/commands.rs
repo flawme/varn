@@ -98,10 +98,7 @@ pub fn cmd_checkpoint(description: &str, json: bool) -> Result<()> {
     // Scan the filesystem.
     let mut scanner = Scanner::with_ignore(&repo.root);
     scanner.set_cache(cache);
-    let scan_result = scanner.scan()?;
-
-    // Save the updated cache for the next scan.
-    scan_result.cache.save(&cache_path)?;
+    let mut scan_result = scanner.scan()?;
 
     // Build the snapshot data (generates the checkpoint ID).
     let meta = CheckpointMeta {
@@ -110,10 +107,33 @@ pub fn cmd_checkpoint(description: &str, json: bool) -> Result<()> {
         created_at: now_unix(),
         root: repo.root.clone(),
     };
-    let snapshot = SnapshotData::new(meta, scan_result.entries);
+    let mut snapshot = SnapshotData::new(meta, scan_result.entries);
 
-    // Store file content blobs in the object store.
-    snapshot.store_content_blobs(&repo.root, &repo.object_store())?;
+    // Store file content blobs in the object store. If the scan cache
+    // served a stale hash (file rewritten with the same size and mtime —
+    // possible on high-resolution filesystems or when a writer preserves
+    // mtime), retry once with a cleared cache so the checkpoint captures
+    // the CURRENT content instead of silently storing a wrong-content
+    // snapshot.
+    if let Err(VarnError::StaleCache { .. }) =
+        snapshot.store_content_blobs(&repo.root, &repo.object_store())
+    {
+        // Discard the cache entirely and rescan: every file is re-hashed.
+        let mut fresh_scanner = Scanner::with_ignore(&repo.root);
+        fresh_scanner.set_cache(crate::filesystem::ScanCache::new());
+        scan_result = fresh_scanner.scan()?;
+        let meta = CheckpointMeta {
+            id: crate::core::CheckpointId("pending".to_string()),
+            description: description.to_string(),
+            created_at: now_unix(),
+            root: repo.root.clone(),
+        };
+        snapshot = SnapshotData::new(meta, scan_result.entries);
+        snapshot.store_content_blobs(&repo.root, &repo.object_store())?;
+    }
+
+    // Save the updated cache for the next scan.
+    scan_result.cache.save(&cache_path)?;
 
     // Persist the snapshot (idempotent: no-op if an identical one exists).
     let saved = snapshot.save(&repo.snapshots_dir())?;
@@ -218,8 +238,12 @@ pub fn cmd_diff(checkpoint: &str, json: bool) -> Result<()> {
     // Load the target snapshot.
     let snapshot = resolve_checkpoint(&repo, checkpoint)?;
 
-    // Scan the current filesystem state.
-    let scanner = Scanner::with_ignore(&repo.root);
+    // Scan the current filesystem state WITHOUT the current .varnignore:
+    // the checkpoint is a self-contained state captured under its own
+    // ignore rules. Filtering this scan by today's rules would produce
+    // phantom changes (files the checkpoint captured but the current rules
+    // exclude would show as DELETED, and vice versa).
+    let scanner = Scanner::new(&repo.root);
     let current = scanner.scan()?;
 
     // Compute the diff.
@@ -286,8 +310,9 @@ pub fn cmd_restore(checkpoint: &str, yes: bool, no_safety: bool, json: bool) -> 
     // Load the target snapshot.
     let snapshot = resolve_checkpoint(&repo, checkpoint)?;
 
-    // Scan the current filesystem state.
-    let scanner = Scanner::with_ignore(&repo.root);
+    // Scan WITHOUT the current .varnignore (see cmd_diff: the checkpoint is
+    // a self-contained state under its own rules).
+    let scanner = Scanner::new(&repo.root);
     let current = scanner.scan()?;
 
     // Plan the restore.
@@ -471,6 +496,18 @@ pub fn cmd_gc(dry_run: bool, json: bool) -> Result<()> {
 /// `varn migrate`
 pub fn cmd_migrate(dry_run: bool, json: bool) -> Result<()> {
     let repo = Repo::open(&PathBuf::from("."))?;
+
+    // A repository written by a NEWER Varn cannot be handled by this
+    // binary: refuse with an actionable error instead of reporting
+    // "already at version N (current)".
+    if repo.config.version > crate::storage::STORAGE_VERSION {
+        return Err(VarnError::Other(format!(
+            "repository version {} is newer than this Varn supports ({}); \
+             upgrade Varn to work with this repository",
+            repo.config.version,
+            crate::storage::STORAGE_VERSION
+        )));
+    }
 
     let needs = crate::storage::needs_migration(&repo);
 

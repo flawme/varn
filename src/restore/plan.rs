@@ -174,18 +174,30 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                                 target: link_target.clone(),
                             });
                         } else if let Some(ref hash) = snap_entry.meta.hash {
-                            actions.push(RestoreAction::WriteFile {
-                                path: (*path).clone(),
-                                hash: hash.clone(),
-                                readonly: snap_entry.meta.readonly,
-                                mtime: snap_entry.meta.mtime,
-                                uid: snap_entry.meta.uid,
-                                gid: snap_entry.meta.gid,
-                                mode: snap_entry.meta.mode,
-                                flags: snap_entry.meta.flags,
-                                attributes: snap_entry.meta.attributes,
-                                acl: snap_entry.meta.acl.clone(),
-                            });
+                            if hash.is_empty() {
+                                // A hashless entry (file was unhashable at
+                                // checkpoint time — e.g. locked by another
+                                // process). Skipping with a warning keeps the
+                                // rest of the restore usable; treating it as
+                                // content would abort or corrupt.
+                                warnings.push(format!(
+                                    "file has no content hash, cannot restore: {}",
+                                    path.display()
+                                ));
+                            } else {
+                                actions.push(RestoreAction::WriteFile {
+                                    path: (*path).clone(),
+                                    hash: hash.clone(),
+                                    readonly: snap_entry.meta.readonly,
+                                    mtime: snap_entry.meta.mtime,
+                                    uid: snap_entry.meta.uid,
+                                    gid: snap_entry.meta.gid,
+                                    mode: snap_entry.meta.mode,
+                                    flags: snap_entry.meta.flags,
+                                    attributes: snap_entry.meta.attributes,
+                                    acl: snap_entry.meta.acl.clone(),
+                                });
+                            }
                         } else {
                             warnings.push(format!(
                                 "file has no content hash, cannot restore: {}",

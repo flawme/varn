@@ -15,5 +15,5 @@ pub mod types;
 // without knowing about the internal split.
 pub use ignore::IgnoreRules;
 pub use scan_cache::{CachedEntry, ScanCache};
-pub use scanner::{ScanResult, ScanWarning, Scanner, hash_bytes};
+pub use scanner::{ScanResult, ScanWarning, Scanner, hash_bytes, hash_file_path};
 pub use types::{EntryKind, EntryMeta, TreeEntry};

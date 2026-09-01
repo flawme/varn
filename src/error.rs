@@ -27,6 +27,16 @@ pub enum VarnError {
     NotImplemented(&'static str),
     /// A catch-all for operational errors that don't fit another variant.
     Other(String),
+    /// A file's content hash differs from the scan-cache-captured hash.
+    ///
+    /// Indicates the incremental cache reused a stale hash (file rewritten
+    /// with the same size and mtime). The checkpoint is aborted so the next
+    /// run can re-hash with a cleared cache.
+    StaleCache {
+        path: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 impl fmt::Display for VarnError {
@@ -49,6 +59,15 @@ impl fmt::Display for VarnError {
                 write!(f, "{what} is not yet implemented in this version")
             }
             Self::Other(msg) => write!(f, "{msg}"),
+            Self::StaleCache {
+                path,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "content of {path} changed since scan (cached hash stale): \
+                 expected {expected}, got {actual} — checkpoint aborted"
+            ),
         }
     }
 }
