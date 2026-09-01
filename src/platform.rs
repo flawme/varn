@@ -285,7 +285,7 @@ pub fn set_security_descriptor(path: &Path, sddl: &str) -> std::io::Result<()> {
     // pointer — NOT the whole security descriptor. Extract the DACL from
     // the converted descriptor via GetSecurityDescriptorDacl; passing the
     // SD itself as the PACL fails with ERROR_INVALID_PARAMETER (os 87).
-    let mut dacl: *mut std::ffi::c_void = std::ptr::null_mut();
+    let mut dacl: *mut windows_sys::Win32::Security::ACL = std::ptr::null_mut();
     let mut dacl_present: i32 = 0;
     let mut dacl_defaulted: i32 = 0;
     let ok_dacl = unsafe {
