@@ -64,6 +64,7 @@ fn locked_delete_target_aborts_before_any_changes() {
     #[cfg(not(unix))]
     {
         let mut perms = fs::metadata(&b).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
         perms.set_readonly(false);
         fs::set_permissions(&b, perms).unwrap();
     }
@@ -108,6 +109,7 @@ fn locked_overwrite_target_aborts_before_any_changes() {
     #[cfg(not(unix))]
     {
         let mut perms = fs::metadata(&b).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
         perms.set_readonly(false);
         fs::set_permissions(&b, perms).unwrap();
     }

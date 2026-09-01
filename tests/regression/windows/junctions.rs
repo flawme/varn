@@ -29,8 +29,7 @@ fn create_junction(target: &std::path::Path, link: &std::path::Path) -> std::io:
     if output.status.success() {
         Ok(())
     } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        Err(std::io::Error::other(
             String::from_utf8_lossy(&output.stderr).into_owned(),
         ))
     }
@@ -48,7 +47,7 @@ fn junction_captured_as_symlink_never_followed() {
     let entry = scan
         .entries
         .iter()
-        .find(|e| e.path == PathBuf::from("jlink"))
+        .find(|e| e.path == std::path::Path::new("jlink"))
         .expect("junction must be listed");
     assert_eq!(
         entry.meta.kind,

@@ -77,7 +77,7 @@ fn safety_checkpoint_of_state_with_readonly_files() {
     #[cfg(not(unix))]
     {
         let mut perms = fs::metadata(&path).unwrap().permissions();
-        #[allow(clippy::set_readonly_false)]
+        #[allow(clippy::permissions_set_readonly_false)]
         perms.set_readonly(false);
         fs::set_permissions(&path, perms).unwrap();
     }
@@ -95,7 +95,7 @@ fn safety_checkpoint_of_state_with_readonly_files() {
     #[cfg(not(unix))]
     {
         let mut perms = fs::metadata(&path).unwrap().permissions();
-        #[allow(clippy::set_readonly_false)]
+        #[allow(clippy::permissions_set_readonly_false)]
         perms.set_readonly(false);
         fs::set_permissions(&path, perms).unwrap();
     }
