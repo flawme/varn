@@ -36,10 +36,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   target's subtree; a junction pointing outside the root cannot cause
   escape). Full reparse-tag classification is future work (FUTURE.md).
 
+### Fixed
+
+- **Windows ACL restore failed with os error 87 (second cause)** — beyond
+  the NUL padding, `SetNamedSecurityInfoW` was handed the whole security
+  descriptor as the DACL pointer. The DACL is now extracted via
+  `GetSecurityDescriptorDacl`, and only `DACL_SECURITY_INFORMATION` is
+  applied (owner/group SDDL restore is future work).
+- **diff reported every restored file as Modified on Windows** — the SDDL
+  re-captured from a restored file legitimately differs from the
+  snapshot's (the filesystem merges and reorders inherited ACEs when the
+  DACL is applied). ACL is excluded from diff's byte-equal metadata
+  comparison; ACL drift is surfaced by restore's best-effort warnings.
+- **Pre-flight probe rejected write-protected files** — clearing
+  write-protection is part of restore's job, so the probe now clears
+  protection before probing; only sharing violations / access denials
+  that survive it abort the restore.
+- **Delete treated a vanished parent as an error** — removing an entry
+  whose parent directory an earlier plan action already deleted
+  (`ENOTDIR`) is handled as already-deleted.
+- **Path-safety guard covered only hashed entries** — a hashless entry
+  with an absolute or traversing path in a snapshot was accepted; the
+  guard now covers every entry.
+
 ### Changed
 
 - Test suite grew from ~306 to 442 tests; `tests/regression/` is the
   canonical home for field-report regressions, one named file per bug.
+- Long-path tests probe the environment first and stay under Windows
+  MAX_PATH including the temp-dir prefix; directory-symlink tests skip
+  when the platform lacks symlink privileges; the unicode normalization
+  test is gated to normalization-sensitive filesystems (APFS folds
+  NFC/NFD).
 
 ## [0.2.1] - 2026-09-01
 
