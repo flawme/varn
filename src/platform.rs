@@ -255,9 +255,7 @@ pub fn set_security_descriptor(path: &Path, sddl: &str) -> std::io::Result<()> {
     use windows_sys::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
     };
-    use windows_sys::Win32::Security::{
-        DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-    };
+    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
 
     let sddl_wide: Vec<u16> = OsStr::new(sddl)
         .encode_wide()
