@@ -16,7 +16,13 @@ fn get_flags(path: &std::path::Path) -> Option<u32> {
     let rel = path.file_name()?.to_str()?;
     scan.entries
         .iter()
-        .find(|e| e.path.file_name()?.to_str() == Some(rel))
+        .find(|e| {
+            e.path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n == rel)
+                .unwrap_or(false)
+        })
         .and_then(|e| e.meta.flags)
 }
 

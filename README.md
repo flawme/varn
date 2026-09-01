@@ -61,6 +61,19 @@ See the [CLI usage reference](docs/usage.md) for details.
 - `--json` output for AI agent integration
 - Linux, macOS, and Windows support
 
+## Platform support
+
+| Platform | Status |
+|----------|--------|
+| Linux    | Officially tested — full CI matrix (build, clippy, 440+ tests) on every commit |
+| Windows  | Officially tested — full CI matrix on every commit, plus field-tested on Windows 11 / NTFS |
+| macOS    | Best-effort — full CI matrix on every commit; macOS shares the Unix code paths with Linux (mode bits, ownership, symlinks), so coverage is substantially equivalent, but we do not currently run dedicated macOS hardware tests |
+
+Every commit runs the complete test suite (442 tests) on ubuntu-latest,
+windows-latest, and macos-latest, so all three platforms compile and pass
+the same regression suite continuously. The distinction above is about
+dedicated human field testing, not CI coverage.
+
 ## Limitations
 
 No extended attributes (xattr), no ACL restoration, no concurrent scanning,
