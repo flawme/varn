@@ -69,7 +69,7 @@ fn readonly_hard_link_re_restore() {
         repo.root().join("secondary.txt"),
     )
     .unwrap();
-    varn::platform_shim_set_readonly(&path);
+    platform_shim::set_readonly(&path);
 
     let snapshot = repo.checkpoint("ro hardlink");
     fs::remove_file(repo.root().join("primary.txt")).unwrap();

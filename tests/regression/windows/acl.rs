@@ -97,19 +97,19 @@ fn attributes_and_acl_together() {
     let repo = TestRepo::new();
     let path = repo.write("full.txt", b"full metadata");
     // Set readonly via attributes (archive default + readonly).
-    varn::platform_shim_set_attrs(&path, 0x21); // READONLY | ARCHIVE
+    platform_shim::set_attrs(&path, 0x21); // READONLY | ARCHIVE
 
     let snapshot = repo.checkpoint("full");
     let entry = crate::common::find_snap_entry(&snapshot, "full.txt");
     assert_eq!(entry.meta.attributes, Some(0x21));
 
     // Clear and restore.
-    varn::platform_shim_set_attrs(&path, 0x20);
+    platform_shim::set_attrs(&path, 0x20);
     repo.restore(&snapshot);
     let now = fs::symlink_metadata(&path).unwrap().file_attributes();
     assert_eq!(now & 0x1, 0x1, "readonly must be restored");
     assert!(repo.verifies(&snapshot));
-    varn::platform_shim_set_attrs(&path, 0x20); // cleanup
+    platform_shim::set_attrs(&path, 0x20); // cleanup
 }
 
 // Shim for direct attribute manipulation in tests.

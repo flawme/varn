@@ -13,13 +13,6 @@ fn attrs_of(path: &std::path::Path) -> u32 {
     fs::symlink_metadata(path).unwrap().file_attributes()
 }
 
-fn set_attrs(path: &std::path::Path, attrs: u32) {
-    varn::platform_set_file_attributes(path, attrs);
-}
-
-// Tiny shim so tests don't reach into cfg-gated platform internals
-// inconsistently; the public path is via the restore engine, but tests
-// need direct manipulation too.
 mod platform_shim {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
@@ -36,7 +29,9 @@ mod platform_shim {
     }
 }
 
-use platform_shim::set_file_attributes as platform_set_file_attributes;
+fn set_attrs(path: &std::path::Path, attrs: u32) {
+    platform_shim::set_file_attributes(path, attrs);
+}
 
 #[test]
 fn readonly_attribute_captured_and_restored() {
