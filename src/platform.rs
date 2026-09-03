@@ -192,9 +192,15 @@ pub fn create_junction(target: &Path, link: &Path) -> std::io::Result<()> {
     // REPARSE_DATA_BUFFER's mount-point payload starts with four u16 fields
     // (offset/length pairs), then the two names. ReparseDataLength excludes
     // the 8-byte common header.
+    // Windows requires a terminating NUL after *each* name, even though the
+    // length fields themselves exclude those terminators. In particular the
+    // print-name offset begins after the substitute name's NUL. Omitting
+    // them produces ERROR_INVALID_REPARSE_DATA from FSCTL_SET_REPARSE_POINT.
     let names_bytes = substitute_name
         .len()
-        .checked_add(print_name.len())
+        .checked_add(1)
+        .and_then(|n| n.checked_add(print_name.len()))
+        .and_then(|n| n.checked_add(1))
         .and_then(|n| n.checked_mul(2))
         .ok_or_else(|| {
             std::io::Error::new(
@@ -218,11 +224,13 @@ pub fn create_junction(target: &Path, link: &Path) -> std::io::Result<()> {
         0,
         0,
         substitute_bytes,
-        substitute_bytes,
+        substitute_bytes + 2,
         print_bytes,
     ];
     buffer.extend_from_slice(&substitute_name);
+    buffer.push(0);
     buffer.extend_from_slice(&print_name);
+    buffer.push(0);
 
     std::fs::create_dir(link)?;
     let wide_link: Vec<u16> = OsStr::new(link)

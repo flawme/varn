@@ -47,7 +47,10 @@ fn unhashable_file_is_omitted_with_warning_not_poisoned() {
     let snapshot = repo.checkpoint_from_scan(&scan, "with locked");
 
     // And the stored snapshot must not contain the locked file or any
-    // empty/null hash sentinel.
+    // empty/null hash sentinel. This test uses Unix permissions to make the
+    // file unreadable; the exact Windows FileShare.None contract lives in
+    // `windows::locks`.
+    #[cfg(unix)]
     assert!(
         snapshot
             .entries
