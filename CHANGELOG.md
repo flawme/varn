@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-03
+
+### Fixed
+
+- **Checkpoint repairs its Git safety guard** — a missing
+  `.varn/.gitignore` is recreated with `*` before checkpoint data is
+  written, so `git add -A` cannot stage the object store.
+- **Warm checkpoints avoid a second content read** — scan-cache hits now
+  reuse their hash when the corresponding object already exists. The cache
+  format is versioned to invalidate the old behavior safely.
+- **Unhashable files no longer create unrestorable snapshots** — files that
+  cannot be read during a scan are omitted and reported as warnings, rather
+  than being saved with `hash: null`. Verification rejects malformed legacy
+  entries and counts every snapshot entry.
+- **Windows junctions retain their type** — junctions are recorded and
+  restored as mount-point reparse points, instead of being mislabeled as
+  symlinks.
+- **Newer repository formats fail migration clearly** — `migrate` reports
+  that a repository created by a newer Varn version is unsupported.
+
+### Changed
+
+- Snapshot lists are ordered deterministically by creation time and ID, and
+  normalized repository roots do not retain a trailing `.` component.
+- The usage documentation now defines the JSON no-op response
+  (`saved: false`, `status: "unchanged"`) and the scan-cache trust model.
+
+### Tests
+
+- Added end-to-end coverage for Git staging protection and warm-cache
+  checkpoint reuse, plus Windows `FileShare.None` and junction regressions.
+
 ## [0.3.0] - 2026-09-01
 
 ### Added

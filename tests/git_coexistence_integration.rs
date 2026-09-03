@@ -151,6 +151,63 @@ fn checkpoint_warning_clears_after_guard_backfill() {
 }
 
 #[test]
+fn checkpoint_recreates_missing_store_guard_before_git_can_stage_store() {
+    // Exercise the command, rather than only the helper: this is the
+    // regression that left a legacy store exposed to `git add -A`.
+    let Ok(_) = Command::new("git").arg("--version").output() else {
+        return;
+    };
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("project");
+    fs::create_dir_all(&root).unwrap();
+    let git_init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    if !git_init.status.success() {
+        return;
+    }
+
+    let repo = Repo::init(&root, "test").unwrap();
+    fs::write(root.join("tracked.txt"), b"tracked").unwrap();
+    fs::remove_file(repo.varn_dir.join(".gitignore")).unwrap();
+
+    let checkpoint = Command::new(env!("CARGO_BIN_EXE_varn"))
+        .args(["checkpoint", "repair guard"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        checkpoint.status.success(),
+        "checkpoint failed: {}",
+        String::from_utf8_lossy(&checkpoint.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(repo.varn_dir.join(".gitignore")).unwrap(),
+        "*\n"
+    );
+
+    let add = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(add.status.success());
+    let staged = Command::new("git")
+        .args(["diff", "--cached", "--name-only"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let staged = String::from_utf8_lossy(&staged.stdout);
+    assert!(
+        !staged.lines().any(|path| path.starts_with(".varn/")),
+        "checkpoint must restore the guard before git can stage the store: {staged}"
+    );
+}
+
+#[test]
 fn store_guard_makes_git_ignore_varn_dir() {
     // The real-world property: git status must not report .varn/ contents.
     // Skipped when git is unavailable.

@@ -68,7 +68,7 @@ The `Scanner` recursively walks a directory tree and produces a sorted list of `
 - **Symlink targets are captured** via `read_link` and stored in `EntryMeta.target`. This enables full symlink restoration, including detecting when a symlink's target has changed.
 - **The `.varn/` directory at the scan root is skipped** so Varn's own metadata is never included in a snapshot.
 - **Ignore patterns** from `.varnignore` are applied during scanning. The pattern matcher supports gitignore-style syntax (`*`, `**`, `?`, `[abc]`, `!negation`, directory-only, anchored). Ignored directories are not recursed into.
-- **Incremental scanning**: a persistent cache (`.varn/index/scan_cache.json`) records each file's size, mtime, and hash. Files whose size and mtime haven't changed since the last scan reuse the cached hash instead of being re-read. The cache is advisory — correctness never depends on it.
+- **Incremental scanning**: a persistent cache (`.varn/index/scan_cache.json`) records each file's size, full nanosecond mtime, and hash. Files whose fingerprint has not changed reuse the cached hash and existing object without being re-read. This is a warm-path performance optimization; as with every metadata-only cache, Varn assumes trusted local writers do not deliberately preserve the complete fingerprint while replacing content.
 - **Hard link detection**: files with `nlink > 1` are grouped by content hash. The first file (by sorted path) in each group is the primary; others get `hardlink_to` set to the primary's path for link-based restoration.
 - **Ownership capture**: on Unix, uid and gid are captured from inode metadata for restoration.
 - **Per-entry errors are collected as `ScanWarning`s** rather than aborting the scan. A single inaccessible file does not prevent scanning the rest of the tree.
@@ -104,7 +104,7 @@ Snapshots are persisted as JSON files in `.varn/snapshots/<checkpoint_id>.json`.
 - `CheckpointMeta` — id, description, timestamp, root path
 - A sorted list of `TreeEntry` records — the captured filesystem state
 
-Checkpoint IDs are deterministic: they are the first 12 hex characters of a SHA-256 hash computed from the snapshot's description, timestamp, root path, and all entry paths/metadata/hashes. This means the same filesystem state checkpointed with the same description and timestamp produces the same ID.
+Checkpoint IDs are deterministic: they are the first 12 hex characters of a SHA-256 hash computed from the snapshot's description, root path, and all entry paths/metadata/hashes. The creation timestamp is deliberately excluded, so the same filesystem state checkpointed again with the same description is a true no-op.
 
 **Idempotent checkpointing**: if a snapshot with the same ID already exists on disk, `save()` is a no-op and returns `false`. This prevents silent overwrites when two checkpoints of identical state are created within the same second. The CLI reports this as `status: "unchanged"` in JSON mode.
 
@@ -129,7 +129,7 @@ The restore engine includes several security measures discovered through adversa
 - **Streaming content verification**: `store_content_streaming` computes the hash during the write and verifies it before committing the object. Temp file names include the process ID to prevent predictable-path symlink attacks.
 - **Metadata restoration**: file permissions (readonly), modification times, and Unix ownership (uid/gid) are restored alongside content.
 - **Full verification**: `verify_restore()` checks kind, content hash, symlink target, readonly flag, and mtime — not just content.
-- **Scan cache integrity**: the incremental scan cache carries a version field; caches with a mismatched version are discarded. The cache is advisory only and never affects correctness.
+- **Scan cache integrity**: the incremental scan cache carries a version field; caches with a mismatched version are discarded. It uses size plus full nanosecond mtime to detect ordinary edits, including same-second NTFS writes, while avoiding a second complete read of already-stored content on warm checkpoints.
 
 ## Error Handling
 

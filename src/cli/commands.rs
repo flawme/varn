@@ -91,6 +91,11 @@ pub fn cmd_init(path: &PathBuf, gitignore: bool, json: bool) -> Result<()> {
 pub fn cmd_checkpoint(description: &str, json: bool) -> Result<()> {
     let repo = Repo::open(&PathBuf::from("."))?;
 
+    // The guard is part of the repository invariant. Re-create it before
+    // doing any work so a legacy/corrupted store cannot be accidentally
+    // staged by a concurrent or subsequent `git add -A`.
+    git_guard::ensure_guard(&repo.varn_dir)?;
+
     // Load the scan cache for incremental scanning.
     let cache_path = repo.varn_dir.join("index").join("scan_cache.json");
     let cache = crate::filesystem::ScanCache::load(&cache_path);
@@ -98,7 +103,7 @@ pub fn cmd_checkpoint(description: &str, json: bool) -> Result<()> {
     // Scan the filesystem.
     let mut scanner = Scanner::with_ignore(&repo.root);
     scanner.set_cache(cache);
-    let mut scan_result = scanner.scan()?;
+    let scan_result = scanner.scan()?;
 
     // Build the snapshot data (generates the checkpoint ID).
     let meta = CheckpointMeta {
@@ -107,30 +112,13 @@ pub fn cmd_checkpoint(description: &str, json: bool) -> Result<()> {
         created_at: now_unix(),
         root: repo.root.clone(),
     };
-    let mut snapshot = SnapshotData::new(meta, scan_result.entries);
+    let snapshot = SnapshotData::new(meta, scan_result.entries);
 
-    // Store file content blobs in the object store. If the scan cache
-    // served a stale hash (file rewritten with the same size and mtime —
-    // possible on high-resolution filesystems or when a writer preserves
-    // mtime), retry once with a cleared cache so the checkpoint captures
-    // the CURRENT content instead of silently storing a wrong-content
-    // snapshot.
-    if let Err(VarnError::StaleCache { .. }) =
-        snapshot.store_content_blobs(&repo.root, &repo.object_store())
-    {
-        // Discard the cache entirely and rescan: every file is re-hashed.
-        let mut fresh_scanner = Scanner::with_ignore(&repo.root);
-        fresh_scanner.set_cache(crate::filesystem::ScanCache::new());
-        scan_result = fresh_scanner.scan()?;
-        let meta = CheckpointMeta {
-            id: crate::core::CheckpointId("pending".to_string()),
-            description: description.to_string(),
-            created_at: now_unix(),
-            root: repo.root.clone(),
-        };
-        snapshot = SnapshotData::new(meta, scan_result.entries);
-        snapshot.store_content_blobs(&repo.root, &repo.object_store())?;
-    }
+    // Store file content blobs in the object store. Hashes reused from the
+    // incremental scan cache deliberately reuse their existing objects
+    // without a second full-file read; newly needed objects are streamed and
+    // verified while they are written.
+    snapshot.store_content_blobs_from_scan(&repo.root, &repo.object_store())?;
 
     // Save the updated cache for the next scan.
     scan_result.cache.save(&cache_path)?;

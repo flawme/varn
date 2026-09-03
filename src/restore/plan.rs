@@ -87,6 +87,8 @@ pub enum RestoreAction {
     },
     /// Create a symbolic link pointing to `target`.
     CreateSymlink { path: PathBuf, target: PathBuf },
+    /// Create an NTFS junction pointing to `target`.
+    CreateJunction { path: PathBuf, target: PathBuf },
     /// Create a hard link from `path` to `target` (another file in the
     /// snapshot). The target must have been restored first.
     CreateHardLink { path: PathBuf, target: PathBuf },
@@ -226,6 +228,14 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                             });
                         }
                     }
+                    EntryKind::Junction => {
+                        if let Some(ref target) = snap_entry.meta.target {
+                            actions.push(RestoreAction::CreateJunction {
+                                path: (*path).clone(),
+                                target: target.clone(),
+                            });
+                        }
+                    }
                     EntryKind::Other => {
                         // Other entry types are not restored in this version.
                     }
@@ -281,6 +291,14 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                         EntryKind::Symlink => {
                             if let Some(ref target) = snap_entry.meta.target {
                                 actions.push(RestoreAction::CreateSymlink {
+                                    path: (*path).clone(),
+                                    target: target.clone(),
+                                });
+                            }
+                        }
+                        EntryKind::Junction => {
+                            if let Some(ref target) = snap_entry.meta.target {
+                                actions.push(RestoreAction::CreateJunction {
                                     path: (*path).clone(),
                                     target: target.clone(),
                                 });
@@ -342,8 +360,11 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                         }
                     }
                     // If hashes and metadata match, no action needed.
-                } else if snap_entry.meta.kind == EntryKind::Symlink {
-                    // Compare symlink targets.
+                } else if matches!(
+                    snap_entry.meta.kind,
+                    EntryKind::Symlink | EntryKind::Junction
+                ) {
+                    // Compare symlink or junction targets.
                     let snap_target = snap_entry.meta.target.as_deref();
                     let curr_target = curr_entry.meta.target.as_deref();
                     if snap_target != curr_target {
@@ -356,10 +377,19 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
                             actions.push(RestoreAction::Delete {
                                 path: (*path).clone(),
                             });
-                            actions.push(RestoreAction::CreateSymlink {
-                                path: (*path).clone(),
-                                target: target.clone(),
-                            });
+                            match snap_entry.meta.kind {
+                                EntryKind::Symlink => actions.push(RestoreAction::CreateSymlink {
+                                    path: (*path).clone(),
+                                    target: target.clone(),
+                                }),
+                                EntryKind::Junction => {
+                                    actions.push(RestoreAction::CreateJunction {
+                                        path: (*path).clone(),
+                                        target: target.clone(),
+                                    })
+                                }
+                                _ => unreachable!("link comparison only handles links"),
+                            }
                         }
                     }
                     // If targets match, no action needed.
@@ -422,6 +452,7 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
             RestoreAction::CreateDir { path, .. }
             | RestoreAction::WriteFile { path, .. }
             | RestoreAction::CreateSymlink { path, .. }
+            | RestoreAction::CreateJunction { path, .. }
             | RestoreAction::CreateHardLink { path, .. } => Some(path.clone()),
             _ => None,
         })
@@ -433,6 +464,7 @@ pub fn plan_restore(snapshot: &[TreeEntry], current: &[TreeEntry]) -> RestorePla
         RestoreAction::CreateDir { path, .. } => (1, path.clone()),
         RestoreAction::WriteFile { path, .. } => (2, path.clone()),
         RestoreAction::CreateSymlink { path, .. } => (2, path.clone()),
+        RestoreAction::CreateJunction { path, .. } => (2, path.clone()),
         RestoreAction::CreateHardLink { path, .. } => (2, path.clone()),
         // Unexpected deletes go last.
         RestoreAction::Delete { path } => (3, path.clone()),

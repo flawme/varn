@@ -289,10 +289,14 @@ fn scan_warning_for_unreadable_file() {
 
     #[cfg(unix)]
     {
-        // File should appear (metadata readable) but hash should be None.
-        let entry = find_entry(&result, "locked.txt");
-        assert_eq!(entry.meta.kind, EntryKind::File);
-        assert!(entry.meta.hash.is_none());
+        // An unreadable file cannot be restored, so it is omitted instead
+        // of being written into the snapshot with `hash: null`.
+        assert!(
+            result
+                .entries
+                .iter()
+                .all(|e| e.path != Path::new("locked.txt"))
+        );
         assert!(
             result
                 .warnings

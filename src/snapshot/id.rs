@@ -27,6 +27,7 @@ pub fn generate_checkpoint_id(meta: &CheckpointMeta, entries: &[TreeEntry]) -> S
             crate::filesystem::EntryKind::File => b"file",
             crate::filesystem::EntryKind::Directory => b"dir\0",
             crate::filesystem::EntryKind::Symlink => b"syml",
+            crate::filesystem::EntryKind::Junction => b"junc",
             crate::filesystem::EntryKind::Other => b"othr",
         });
         // Include symlink target so different targets produce different IDs.

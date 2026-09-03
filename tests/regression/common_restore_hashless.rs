@@ -1,14 +1,14 @@
 //! BUG 5 regression: unhashable files must not poison checkpoints.
 //!
-//! Field report (0.2.0): a file locked during hashing was recorded with
-//! `hash: ""` and could never be restored — every restore failed
-//! verification forever. Fix: hashless entries are skipped with a warning,
-//! restore tolerates their absence, verification exempts them.
+//! A file locked during hashing was recorded with `hash: null` and could
+//! never be restored. New checkpoints omit it, retaining only the scan
+//! warning. Verification remains strict for old malformed snapshots so it
+//! cannot claim that an absent file was restored.
 
 use crate::common::TestRepo;
 
 #[test]
-fn unhashable_file_is_skipped_with_warning_not_poisoned() {
+fn unhashable_file_is_omitted_with_warning_not_poisoned() {
     let repo = TestRepo::new();
     repo.write("ok.txt", b"normal content");
 
@@ -30,18 +30,31 @@ fn unhashable_file_is_skipped_with_warning_not_poisoned() {
         .find(|e| e.path.to_string_lossy().ends_with("locked.txt"));
     #[cfg(unix)]
     {
-        let entry = locked_entry.expect("unreadable file must still be listed");
         assert!(
-            entry.meta.hash.is_none(),
-            "unhashable file must have no hash, got {:?}",
-            entry.meta.hash
+            locked_entry.is_none(),
+            "unreadable file must not become an unrestorable snapshot entry"
+        );
+        assert!(
+            scan.warnings
+                .iter()
+                .any(|w| w.path.ends_with("locked.txt") && w.message.contains("cannot hash file")),
+            "unreadable file must be reported as a scan warning: {:?}",
+            scan.warnings
         );
     }
 
     // The checkpoint must succeed (warning, not abort).
     let snapshot = repo.checkpoint_from_scan(&scan, "with locked");
 
-    // And the stored snapshot must not contain an empty-string hash.
+    // And the stored snapshot must not contain the locked file or any
+    // empty/null hash sentinel.
+    assert!(
+        snapshot
+            .entries
+            .iter()
+            .all(|e| !e.path.to_string_lossy().ends_with("locked.txt")),
+        "locked file must be absent from the snapshot"
+    );
     for e in &snapshot.entries {
         if let Some(h) = &e.meta.hash {
             assert!(!h.is_empty(), "empty-string hash poisons snapshots");
@@ -113,7 +126,7 @@ fn restore_skips_hashless_entries_with_warning() {
 }
 
 #[test]
-fn verification_tolerates_missing_hashless_entries() {
+fn verification_rejects_missing_hashless_entries_from_legacy_snapshots() {
     let repo = TestRepo::new();
     repo.write("ok.txt", b"normal");
 
@@ -144,12 +157,12 @@ fn verification_tolerates_missing_hashless_entries() {
     };
     let snapshot = varn::snapshot::SnapshotData::new(meta, entries);
 
-    // Restore skips locked.txt (absent on disk). Verification must PASS —
-    // before the fix it failed forever because the count never matched.
+    // Restore skips locked.txt (absent on disk). An old malformed snapshot
+    // must now report verification failure instead of a false pass.
     repo.restore(&snapshot);
     assert!(
-        repo.verifies(&snapshot),
-        "verification must tolerate hashless entries being absent"
+        !repo.verifies(&snapshot),
+        "verification must count every legacy snapshot entry"
     );
 }
 

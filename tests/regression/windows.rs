@@ -8,4 +8,5 @@ mod acl;
 mod attributes;
 mod hardlinks;
 mod junctions;
+mod locks;
 mod win_paths;

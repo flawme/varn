@@ -79,6 +79,259 @@ pub fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Return whether `path` is an NTFS junction (a mount-point reparse point).
+///
+/// Rust's `FileType` exposes both junctions and symbolic links as symlinks.
+/// Windows' reparse tag is the authoritative distinction. Failure to inspect
+/// a reparse point is intentionally treated as "not a junction" so scanning
+/// remains non-fatal for inaccessible entries.
+pub fn is_junction(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            FileAttributeTagInfo, GetFileInformationByHandleEx, OPEN_EXISTING,
+        };
+        use windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_MOUNT_POINT;
+
+        let wide: Vec<u16> = OsStr::new(path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            return false;
+        }
+        let mut tag: FILE_ATTRIBUTE_TAG_INFO = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                FileAttributeTagInfo,
+                (&mut tag as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+                std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+            )
+        };
+        unsafe { CloseHandle(handle) };
+        ok != 0 && tag.ReparseTag == IO_REPARSE_TAG_MOUNT_POINT
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// Create an NTFS junction at `link` pointing to `target`.
+///
+/// A junction is a mount-point reparse point, not a directory symlink. The
+/// reparse buffer format is documented by `FSCTL_SET_REPARSE_POINT`; using
+/// it directly avoids invoking `cmd.exe` and keeps paths with spaces or
+/// shell metacharacters safe.
+#[cfg(windows)]
+pub fn create_junction(target: &Path, link: &Path) -> std::io::Result<()> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+    use windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_MOUNT_POINT;
+
+    // Junctions require an absolute target. Canonicalization also removes a
+    // potentially ambiguous `.`/`..` component from a captured target.
+    let target = normalize_junction_target(target);
+    let target = std::fs::canonicalize(target)?;
+    let raw_print_name: Vec<u16> = target.as_os_str().encode_wide().collect();
+    // `canonicalize` can return an extended `\\?\\` path. The print name
+    // should remain a normal Win32 path, while the substitute name below
+    // receives its required NT namespace prefix.
+    let print_name: Vec<u16> =
+        if raw_print_name.starts_with(&[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16]) {
+            raw_print_name[4..].to_vec()
+        } else {
+            raw_print_name
+        };
+    let substitute_name = junction_substitute_name(&print_name)?;
+    let substitute_bytes = substitute_name
+        .len()
+        .checked_mul(2)
+        .and_then(|n| u16::try_from(n).ok())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "junction target is too long",
+            )
+        })?;
+    let print_bytes = print_name
+        .len()
+        .checked_mul(2)
+        .and_then(|n| u16::try_from(n).ok())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "junction target is too long",
+            )
+        })?;
+    // REPARSE_DATA_BUFFER's mount-point payload starts with four u16 fields
+    // (offset/length pairs), then the two names. ReparseDataLength excludes
+    // the 8-byte common header.
+    let names_bytes = substitute_name
+        .len()
+        .checked_add(print_name.len())
+        .and_then(|n| n.checked_mul(2))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "junction target is too long",
+            )
+        })?;
+    let data_len = 8usize
+        .checked_add(names_bytes)
+        .and_then(|n| u16::try_from(n).ok())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "junction target is too long",
+            )
+        })?;
+    let mut buffer: Vec<u16> = vec![
+        (IO_REPARSE_TAG_MOUNT_POINT & 0xffff) as u16,
+        (IO_REPARSE_TAG_MOUNT_POINT >> 16) as u16,
+        data_len,
+        0,
+        0,
+        substitute_bytes,
+        substitute_bytes,
+        print_bytes,
+    ];
+    buffer.extend_from_slice(&substitute_name);
+    buffer.extend_from_slice(&print_name);
+
+    std::fs::create_dir(link)?;
+    let wide_link: Vec<u16> = OsStr::new(link)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide_link.as_ptr(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        let err = std::io::Error::last_os_error();
+        let _ = std::fs::remove_dir(link);
+        return Err(err);
+    }
+    let mut returned = 0;
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            FSCTL_SET_REPARSE_POINT,
+            buffer.as_ptr().cast(),
+            (buffer.len() * std::mem::size_of::<u16>()) as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        let err = std::io::Error::last_os_error();
+        let _ = std::fs::remove_dir(link);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Translate the NT-native spelling returned by some junction APIs
+/// (`\\??\\C:\\...`) to the Win32 extended-path spelling accepted by the
+/// standard library (`\\\\?\\C:\\...`). `read_link` is allowed to return
+/// either spelling, so restore normalizes before canonicalizing the target.
+#[cfg(windows)]
+fn normalize_junction_target(target: &Path) -> std::path::PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    const BACKSLASH: u16 = b'\\' as u16;
+    const QUESTION: u16 = b'?' as u16;
+    let raw: Vec<u16> = target.as_os_str().encode_wide().collect();
+    if raw.starts_with(&[BACKSLASH, QUESTION, QUESTION, BACKSLASH]) {
+        let mut win32 = vec![BACKSLASH, BACKSLASH, QUESTION, BACKSLASH];
+        win32.extend_from_slice(&raw[4..]);
+        std::path::PathBuf::from(OsString::from_wide(&win32))
+    } else {
+        target.to_path_buf()
+    }
+}
+
+/// Convert an absolute Win32 target path to a junction substitute name.
+///
+/// Local paths use `\\??\\C:\\...`; UNC paths use
+/// `\\??\\UNC\\server\\share\\...`. The input from `canonicalize` may
+/// carry a `\\?\\` extended-path prefix, which is removed for the printable
+/// name and converted for the substitute name.
+#[cfg(windows)]
+fn junction_substitute_name(print_name: &[u16]) -> std::io::Result<Vec<u16>> {
+    const BACKSLASH: u16 = b'\\' as u16;
+    const QUESTION: u16 = b'?' as u16;
+    const U: u16 = b'U' as u16;
+    const N: u16 = b'N' as u16;
+    const C: u16 = b'C' as u16;
+
+    let name = if print_name.starts_with(&[BACKSLASH, BACKSLASH, QUESTION, BACKSLASH]) {
+        &print_name[4..]
+    } else {
+        print_name
+    };
+    if name.len() >= 2 && name[0] == BACKSLASH && name[1] == BACKSLASH {
+        let mut result = vec![BACKSLASH, QUESTION, QUESTION, BACKSLASH, U, N, C, BACKSLASH];
+        result.extend_from_slice(&name[2..]);
+        return Ok(result);
+    }
+    // An absolute DOS path starts with a drive designator, for example C:\\.
+    if name.len() >= 3 && name[1] == b':' as u16 && name[2] == BACKSLASH {
+        let mut result = vec![BACKSLASH, QUESTION, QUESTION, BACKSLASH];
+        result.extend_from_slice(name);
+        return Ok(result);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "junction target must be an absolute local or UNC path",
+    ))
+}
+
+#[cfg(not(windows))]
+pub fn create_junction(_target: &Path, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "junctions are only supported on Windows",
+    ))
+}
+
 /// Set macOS BSD file flags (`st_flags`) on a path.
 ///
 /// Uses `lchflags(2)`. Best-effort by design: the caller treats

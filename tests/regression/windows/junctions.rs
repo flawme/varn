@@ -1,15 +1,15 @@
 //! Windows junction regressions (field report item 11).
 //!
-//! Junctions are NTFS directory reparse points. `std::fs::FileType`
-//! reports them as symlinks, so Varn captures them as `EntryKind::Symlink`
-//! with the junction target. That classification is pinned here:
+//! Junctions are NTFS directory reparse points. `std::fs::FileType` reports
+//! them as symlinks, so Varn must inspect the reparse tag and preserve them
+//! as `EntryKind::Junction` with the junction target. That classification is
+//! pinned here:
 //!
 //! - The junction itself is captured (never followed — following it would
 //!   checkpoint the target's entire subtree and risk traversal).
 //! - Restore re-creates the junction as a link.
 //!
-//! Full junction semantics (distinguishing junctions from symlinks via
-//! reparse tags) are future work — see FUTURE.md.
+//! Restore recreates an NTFS junction, not a directory symlink.
 
 use crate::common::TestRepo;
 use std::fs;
@@ -35,7 +35,7 @@ fn create_junction(target: &std::path::Path, link: &std::path::Path) -> std::io:
 }
 
 #[test]
-fn junction_captured_as_symlink_never_followed() {
+fn junction_captured_as_junction_never_followed() {
     let repo = TestRepo::new();
     repo.write("realdir/inside.txt", b"inside the real dir");
 
@@ -50,8 +50,8 @@ fn junction_captured_as_symlink_never_followed() {
         .expect("junction must be listed");
     assert_eq!(
         entry.meta.kind,
-        varn::filesystem::EntryKind::Symlink,
-        "junction is recorded as a symlink (documented classification)"
+        varn::filesystem::EntryKind::Junction,
+        "junction must be recorded with its distinct reparse-point kind"
     );
     // The junction's TARGET contents must appear exactly once — through the
     // real path, never through the junction.
@@ -75,13 +75,12 @@ fn junction_round_trip() {
     fs::remove_dir(&junction).unwrap(); // remove_dir removes a junction
 
     repo.restore(&snapshot);
-    // The junction is restored as a reparse point (symlink/junction).
+    // The junction is restored as a mount-point reparse point, not merely a
+    // directory symlink.
     let restored = repo.root().join("jlink");
-    let meta = fs::symlink_metadata(&restored).unwrap();
     assert!(
-        meta.file_type().is_symlink() || meta.file_type().is_dir(),
-        "restored junction must be a link or dir, got {:?}",
-        meta.file_type()
+        varn::platform::is_junction(&restored),
+        "restored link must retain the junction reparse tag"
     );
     // And the real directory content is intact.
     assert_eq!(repo.read_str("realdir/inside.txt"), "inside");

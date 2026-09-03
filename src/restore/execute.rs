@@ -87,6 +87,22 @@ fn clear_write_protection(path: &Path) {
     }
 }
 
+/// Remove one filesystem entry without following an NTFS junction.
+///
+/// `remove_dir_all` is appropriate for a real directory but is dangerous for
+/// a junction: depending on the Windows API path, it can traverse into the
+/// target tree. A junction itself is an empty reparse-point directory and
+/// must be removed with `remove_dir`.
+fn remove_existing_entry(path: &Path, meta: &fs::Metadata) -> std::io::Result<()> {
+    if crate::platform::is_junction(path) {
+        fs::remove_dir(path)
+    } else if meta.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
 /// Whether some parent component of `path` is scheduled to change kind
 /// (directory replaced by file or vice versa) by the plan.
 ///
@@ -339,6 +355,7 @@ pub fn execute_restore(
             RestoreAction::CreateDir { path, .. }
             | RestoreAction::WriteFile { path, .. }
             | RestoreAction::CreateSymlink { path, .. }
+            | RestoreAction::CreateJunction { path, .. }
             | RestoreAction::CreateHardLink { path, .. }
             | RestoreAction::ApplyDirMeta { path, .. }
             | RestoreAction::Delete { path } => path,
@@ -540,13 +557,28 @@ pub fn execute_restore(
                 if full.exists() || fs::symlink_metadata(&full).is_ok() {
                     clear_write_protection(&full);
                     let meta = fs::symlink_metadata(&full)?;
-                    if meta.is_dir() {
-                        fs::remove_dir_all(&full)?;
-                    } else {
-                        fs::remove_file(&full)?;
-                    }
+                    remove_existing_entry(&full, &meta)?;
                 }
                 crate::platform::create_symlink(target, &full)?;
+                symlinks_created += 1;
+            }
+            RestoreAction::CreateJunction { path, target } => {
+                let full = root.join(path);
+                if has_symlink_in_leading_path(root, &full) {
+                    return Err(VarnError::InvalidPath(format!(
+                        "refusing to create junction through a symlink in the path (could escape root): {}",
+                        path.display()
+                    )));
+                }
+                if let Some(parent) = full.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                if full.exists() || fs::symlink_metadata(&full).is_ok() {
+                    clear_write_protection(&full);
+                    let meta = fs::symlink_metadata(&full)?;
+                    remove_existing_entry(&full, &meta)?;
+                }
+                crate::platform::create_junction(target, &full)?;
                 symlinks_created += 1;
             }
             RestoreAction::CreateHardLink { path, target } => {
@@ -592,11 +624,7 @@ pub fn execute_restore(
                 // If something already exists at this path, remove it first.
                 if full.exists() || fs::symlink_metadata(&full).is_ok() {
                     let meta = fs::symlink_metadata(&full)?;
-                    if meta.is_dir() {
-                        fs::remove_dir_all(&full)?;
-                    } else {
-                        fs::remove_file(&full)?;
-                    }
+                    remove_existing_entry(&full, &meta)?;
                 }
                 // Create a hard link to the primary file.
                 // The target must have been restored first (sorting ensures
@@ -630,11 +658,7 @@ pub fn execute_restore(
                 // Clear write-protection before deleting (Windows refuses
                 // to delete read-only files).
                 clear_write_protection(&full);
-                if meta.is_dir() {
-                    fs::remove_dir_all(&full)?;
-                } else {
-                    fs::remove_file(&full)?;
-                }
+                remove_existing_entry(&full, &meta)?;
                 deleted += 1;
             }
             RestoreAction::ApplyDirMeta { .. } => unreachable!("deferred above"),

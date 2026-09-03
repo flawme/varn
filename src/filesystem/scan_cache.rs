@@ -7,11 +7,16 @@
 //!
 //! The cache is persisted as JSON in `.varn/index/scan_cache.json`.
 //!
-//! This is safe because:
-//! - If a file's content changes, its mtime almost always changes too.
+//! This is fast and reliable for ordinary filesystem writes because:
+//! - If a file's content changes, its mtime changes in normal use.
 //! - If only the mtime changes (e.g. `touch`), the hash is recomputed.
 //! - If the cache is missing or corrupt, a full scan is performed.
-//! - The cache is advisory: correctness never depends on it.
+//!
+//! The cache is an optimization, not a cryptographic content attestation:
+//! software that deliberately preserves both size and nanosecond mtime can
+//! make any metadata-only cache stale. Varn invalidates stale cache formats
+//! and streams/verifies every object that is not already present; the
+//! managed `.varn/` directory must remain private to trusted local users.
 
 use crate::error::Result;
 use crate::filesystem::TreeEntry;
@@ -48,11 +53,11 @@ pub struct CachedEntry {
 ///
 /// # Trust model
 ///
-/// The cache is **advisory only**: it affects performance (whether to re-hash
-/// a file), never correctness. Content stored via `store_content_streaming`
-/// is independently hash-verified. A poisoned or corrupt cache can cause a
-/// stale hash to be reported for a modified file, but this is detected by
-/// the hash verification during storage and by diff/restore comparison.
+/// The cache is a metadata fingerprint used to decide whether a file needs
+/// re-hashing. It uses size plus full nanosecond mtime, which catches normal
+/// edits including same-second writes on NTFS. It is intentionally trusted
+/// on warm checkpoints so Varn does not re-read every unchanged multi-GB
+/// file after the scanner has already found a cache hit.
 ///
 /// The cache carries a `version` field so future format changes can
 /// invalidate the entire cache by bumping `CACHE_VERSION`.
@@ -67,7 +72,7 @@ pub struct ScanCache {
 }
 
 /// The current cache format version. Bump to invalidate all existing caches.
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 
 impl ScanCache {
     /// Create an empty cache at the current format version.

@@ -189,7 +189,13 @@ impl Scanner {
                 }
             };
 
-            let kind = EntryKind::from_file_type(meta.file_type());
+            let mut kind = EntryKind::from_file_type(meta.file_type());
+            // NTFS junctions are mount-point reparse points. Rust reports
+            // them as symlinks, but they have distinct restore semantics and
+            // must not be silently converted to directory symlinks.
+            if kind == EntryKind::Symlink && platform::is_junction(&full) {
+                kind = EntryKind::Junction;
+            }
 
             // Check ignore rules. We need the kind to know if this is a
             // directory (for directory-only patterns). If ignored, skip
@@ -233,8 +239,17 @@ impl Scanner {
                 None
             };
 
+            // A regular file with no content hash cannot be restored. Do not
+            // write a `hash: null` entry into a checkpoint: it advertises a
+            // file that Varn has no content for and used to make restores
+            // report a misleading successful verification. The hash failure
+            // above is already retained as a scan warning for the user.
+            if kind == EntryKind::File && hash.is_none() {
+                continue;
+            }
+
             // For symlinks, capture the target path so it can be restored.
-            let target = if kind == EntryKind::Symlink {
+            let target = if matches!(kind, EntryKind::Symlink | EntryKind::Junction) {
                 match fs::read_link(&full) {
                     Ok(t) => Some(t),
                     Err(e) => {
@@ -781,9 +796,13 @@ mod tests {
         let result = Scanner::new(tmp.path()).scan().unwrap();
         #[cfg(unix)]
         {
-            let entry = find_entry(&result, "locked.txt");
-            assert_eq!(entry.meta.kind, EntryKind::File);
-            assert!(entry.meta.hash.is_none());
+            assert!(
+                result
+                    .entries
+                    .iter()
+                    .all(|e| e.path != Path::new("locked.txt")),
+                "unreadable files must not become hashless entries"
+            );
             assert!(
                 result
                     .warnings

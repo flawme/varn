@@ -1,4 +1,4 @@
-//! BUG 1 regression: scan cache must never serve a stale hash.
+//! BUG 1 regression: scan cache must distinguish ordinary same-size writes.
 //!
 //! Field report (Windows, 0.2.0): the cache keyed on `(size, mtime-seconds)`.
 //! Two same-size writes within one second produced identical keys, so the
@@ -65,7 +65,7 @@ fn cache_reuse_only_for_identical_subsecond_mtime() {
 }
 
 #[test]
-fn stale_cache_entry_is_detected_and_checkpoint_self_heals() {
+fn conservative_storage_rejects_a_manually_poisoned_cache_hash() {
     // Simulate the exact poisoning path: a cache entry whose hash does not
     // match the file's real content. The checkpoint must abort-and-retry
     // with a cleared cache, capturing the CURRENT content.
@@ -90,8 +90,9 @@ fn stale_cache_entry_is_detected_and_checkpoint_self_heals() {
         },
     );
 
-    // A scan WITH the poisoned cache would report the stale hash; the
-    // checkpoint path must detect the mismatch at store time and re-hash.
+    // A scan WITH the poisoned cache would report the stale hash. The public
+    // snapshot-storage API is deliberately conservative for callers that
+    // construct a snapshot outside the CLI's trusted incremental cache.
     let mut scanner = Scanner::new(&repo.repo.root);
     scanner.set_cache(poisoned);
     let bad_scan = scanner.scan().unwrap();
@@ -106,9 +107,8 @@ fn stale_cache_entry_is_detected_and_checkpoint_self_heals() {
         "precondition: poisoned cache serves the stale hash"
     );
 
-    // The checkpoint built from the poisoned scan must fail storage and the
-    // retry path must capture the correct content. Drive the same logic the
-    // CLI uses: store_content_blobs returns StaleCache.
+    // The externally constructed snapshot must fail storage rather than
+    // accepting a poisoned hash/object mapping.
     let meta = varn::core::CheckpointMeta {
         id: varn::core::CheckpointId("pending".to_string()),
         description: "poisoned".to_string(),
@@ -127,7 +127,7 @@ fn stale_cache_entry_is_detected_and_checkpoint_self_heals() {
         "expected a stale-hash abort, got: {msg}"
     );
 
-    // Self-heal: fresh scan (cleared cache) captures the correct content.
+    // Self-heal: a fresh scan captures the correct content.
     let healed = repo.checkpoint("healed");
     let healed_hash = crate::common::find_snap_entry(&healed, "data.txt")
         .meta

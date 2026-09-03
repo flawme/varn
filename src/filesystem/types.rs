@@ -17,6 +17,12 @@ pub enum EntryKind {
     Directory,
     /// A symbolic link.
     Symlink,
+    /// A Windows NTFS junction (mount-point reparse point).
+    ///
+    /// Junctions and directory symlinks are distinct Windows filesystem
+    /// types. Keeping the distinction lets restore reproduce a junction
+    /// rather than silently changing it into a symlink.
+    Junction,
     /// Any other entry type (sockets, fifos, block/char devices).
     Other,
 }
@@ -39,7 +45,7 @@ impl EntryKind {
 /// Metadata for a single filesystem entry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EntryMeta {
-    /// Kind of entry (file, directory, symlink, other).
+    /// Kind of entry (file, directory, symlink, junction, other).
     pub kind: EntryKind,
     /// File size in bytes (0 for directories and symlinks).
     pub size: u64,
@@ -50,8 +56,8 @@ pub struct EntryMeta {
     /// Content hash (SHA-256) for regular files, or `None` for directories,
     /// symlinks, and other entry types.
     pub hash: Option<String>,
-    /// Target path for symlinks (what the link points to), or `None` for
-    /// all other entry types.
+    /// Target path for symlinks and junctions (what the link points to), or
+    /// `None` for all other entry types.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<PathBuf>,
     /// Number of hard links to this file. 1 for a normal file with no
@@ -189,6 +195,8 @@ mod tests {
         assert_eq!(json, "\"directory\"");
         let json = serde_json::to_string(&EntryKind::Symlink).unwrap();
         assert_eq!(json, "\"symlink\"");
+        let json = serde_json::to_string(&EntryKind::Junction).unwrap();
+        assert_eq!(json, "\"junction\"");
         let json = serde_json::to_string(&EntryKind::Other).unwrap();
         assert_eq!(json, "\"other\"");
     }

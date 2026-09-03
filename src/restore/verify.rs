@@ -13,22 +13,27 @@ use std::path::{Path, PathBuf};
 /// Re-scans the filesystem and compares entries. Returns `true` if the
 /// state matches, `false` otherwise.
 pub fn verify_restore(root: &Path, snapshot: &[TreeEntry]) -> bool {
+    // `hash: null` is an old malformed snapshot representation for an
+    // unreadable regular file. It does not describe restorable content, so
+    // it can never be a verified restore even if a same-named file happens
+    // to exist on disk.
+    if snapshot.iter().any(|entry| {
+        entry.meta.kind == EntryKind::File && entry.meta.hash.as_deref().is_none_or(str::is_empty)
+    }) {
+        return false;
+    }
+
     let scanner = crate::filesystem::Scanner::new(root);
     let scan_result = match scanner.scan() {
         Ok(r) => r,
         Err(_) => return false,
     };
 
-    // Compare entry counts. Hashless snapshot entries (unhashable at
-    // checkpoint time — e.g. locked) are exempt: restore skips them with a
-    // warning, so the disk legitimately has fewer entries.
-    let hashless = snapshot
-        .iter()
-        .filter(|e| {
-            e.meta.kind == EntryKind::File && e.meta.hash.as_deref().is_none_or(str::is_empty)
-        })
-        .count();
-    if scan_result.entries.len() + hashless != snapshot.len() {
+    // Every snapshot entry must have a matching entry on disk. New
+    // checkpoints omit unreadable files rather than persisting `hash: null`;
+    // this strict count also makes an older, hashless snapshot fail honestly
+    // instead of reporting a false successful restore.
+    if scan_result.entries.len() != snapshot.len() {
         return false;
     }
 
@@ -44,21 +49,14 @@ pub fn verify_restore(root: &Path, snapshot: &[TreeEntry]) -> bool {
                 if entry.meta.kind != snap_entry.meta.kind {
                     return false;
                 }
-                // For files, compare hash. Entries with an empty snapshot
-                // hash (unhashable at checkpoint time) are exempt: they were
-                // never captured, so the file on disk legitimately differs.
-                if entry.meta.kind == EntryKind::File
-                    && snap_entry
-                        .meta
-                        .hash
-                        .as_deref()
-                        .is_some_and(|h| !h.is_empty())
-                    && entry.meta.hash != snap_entry.meta.hash
-                {
+                // For files, compare hash. Hashless file entries were
+                // rejected above because they cannot be restored or
+                // verified.
+                if entry.meta.kind == EntryKind::File && entry.meta.hash != snap_entry.meta.hash {
                     return false;
                 }
-                // For symlinks, compare target.
-                if entry.meta.kind == EntryKind::Symlink
+                // For symlinks and junctions, compare target.
+                if matches!(entry.meta.kind, EntryKind::Symlink | EntryKind::Junction)
                     && entry.meta.target != snap_entry.meta.target
                 {
                     return false;

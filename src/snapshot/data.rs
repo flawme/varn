@@ -178,7 +178,41 @@ impl SnapshotData {
     ///
     /// If the file's content has changed since the scan (its hash no longer
     /// matches), an error is returned to prevent storing inconsistent data.
+    ///
+    /// This is the conservative API for callers that construct snapshots
+    /// themselves. It revalidates entries whose objects already exist. The
+    /// CLI's incremental scanner uses [`Self::store_content_blobs_from_scan`]
+    /// instead: its cache key already establishes that an unchanged file may
+    /// reuse its object, so re-reading every cached file would defeat the
+    /// cache entirely.
     pub fn store_content_blobs(&self, source_root: &Path, store: &ObjectStore) -> Result<()> {
+        self.store_content_blobs_impl(source_root, store, true)
+    }
+
+    /// Store content collected by a [`crate::filesystem::Scanner`].
+    ///
+    /// Unlike [`Self::store_content_blobs`], this does not re-read a file
+    /// merely because its content-addressed object already exists. Scanner
+    /// cache hits are keyed by path, size, and full nanosecond mtime, and
+    /// their hash is intentionally reused. Files that need a new object are
+    /// still streamed and hash-verified before being stored.
+    ///
+    /// This is crate-private so externally constructed snapshots retain the
+    /// conservative validation contract above.
+    pub(crate) fn store_content_blobs_from_scan(
+        &self,
+        source_root: &Path,
+        store: &ObjectStore,
+    ) -> Result<()> {
+        self.store_content_blobs_impl(source_root, store, false)
+    }
+
+    fn store_content_blobs_impl(
+        &self,
+        source_root: &Path,
+        store: &ObjectStore,
+        verify_existing_objects: bool,
+    ) -> Result<()> {
         // Path-safety guard applies to EVERY entry, hashless or not: an
         // absolute or traversing path in a snapshot is hostile regardless
         // of whether it carries content.
@@ -202,20 +236,19 @@ impl SnapshotData {
         for entry in &self.entries {
             if let Some(ref hash) = entry.meta.hash {
                 if store.exists(hash) {
-                    // The object exists — but the entry's hash may be stale
-                    // (scan-cache reuse for a file rewritten with the same
-                    // size and mtime). Verify the file's actual content hash
-                    // before trusting the object mapping; a mismatch aborts
-                    // the checkpoint rather than storing a wrong-content
-                    // snapshot.
-                    let full_path = source_root.join(&entry.path);
-                    let actual = crate::filesystem::hash_file_path(&full_path)?;
-                    if actual != *hash {
-                        return Err(VarnError::StaleCache {
-                            path: entry.path.display().to_string(),
-                            expected: hash.clone(),
-                            actual,
-                        });
+                    if verify_existing_objects {
+                        // An externally constructed snapshot has no scanner
+                        // cache provenance, so verify its object mapping
+                        // before trusting it.
+                        let full_path = source_root.join(&entry.path);
+                        let actual = crate::filesystem::hash_file_path(&full_path)?;
+                        if actual != *hash {
+                            return Err(VarnError::StaleCache {
+                                path: entry.path.display().to_string(),
+                                expected: hash.clone(),
+                                actual,
+                            });
+                        }
                     }
                     continue;
                 }
@@ -525,6 +558,39 @@ mod tests {
 
         assert!(store.exists(&hash));
         assert_eq!(store.read_content(&hash).unwrap(), b"same");
+    }
+
+    #[test]
+    fn scan_storage_reuses_existing_object_without_reopening_source_file() {
+        // A warm checkpoint must not hash an already-cached 1 GB file again.
+        // Moving the source after the scan proves the incremental storage
+        // path only needs the object that was already stored for that hash.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let repo = Repo::init(root, "linux").unwrap();
+        let source = root.join("large.bin");
+        std::fs::write(&source, b"cached content").unwrap();
+
+        let scan = crate::filesystem::Scanner::new(root).scan().unwrap();
+        let meta = CheckpointMeta {
+            id: CheckpointId("pending".to_string()),
+            description: "warm".to_string(),
+            created_at: 1,
+            root: root.to_path_buf(),
+        };
+        let data = SnapshotData::new(meta, scan.entries);
+        let store = repo.object_store();
+        // First checkpoint creates and hash-verifies the object.
+        data.store_content_blobs(root, &store).unwrap();
+        let hash = data.entries[0].meta.hash.clone().unwrap();
+        assert!(store.exists(&hash));
+
+        std::fs::rename(&source, root.join("large.bin.moved")).unwrap();
+        // A source reopen here would fail. Warm storage must reuse the
+        // existing object, which is exactly what avoids the v0.3.0 40x
+        // regression for large files.
+        data.store_content_blobs_from_scan(root, &store).unwrap();
+        assert_eq!(store.read_content(&hash).unwrap(), b"cached content");
     }
 
     #[test]

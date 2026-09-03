@@ -26,8 +26,9 @@ entry is not duplicated if a recognized spelling (`.varn`, `.varn/`,
 error if the directory is not inside a git repository.
 
 If the store is not excluded from git (for example, a store created by an
-older Varn version), `varn init` and `varn checkpoint` print a warning with
-a copy-pasteable fix. Running `varn migrate` backfills the missing guard.
+older Varn version), `varn checkpoint` automatically recreates the
+store-level guard before scanning. Running `varn migrate` also backfills the
+guard for stores that are not checkpointed immediately.
 
 ### `varn checkpoint`
 
@@ -44,9 +45,12 @@ A checkpoint includes:
 - Root path
 - Full filesystem state (file paths, metadata, content hashes)
 
-File contents are stored in the content-addressed object store with deduplication. Checkpointing the same state twice is a no-op (idempotent).
+File contents are stored in the content-addressed object store with deduplication. Checkpointing the same state twice is a no-op (idempotent). A file
+that cannot be read and hashed (for example, one locked by another process)
+is omitted from that checkpoint and reported in `warnings`; Varn never emits
+an unrestorable `hash: null` file entry.
 
-Incremental scanning: on each checkpoint, Varn loads `.varn/index/scan_cache.json` and reuses cached content hashes for files whose size and mtime haven't changed. The cache is saved after each scan.
+Incremental scanning: on each checkpoint, Varn loads `.varn/index/scan_cache.json` and reuses cached content hashes for files whose size and full nanosecond mtime haven't changed. The cache is saved after each scan, so warm checkpoints do not re-read unchanged content already present in the object store.
 
 ### `varn list`
 
@@ -166,9 +170,9 @@ Varn is designed to coexist with Git in the same directory:
 - Varn never reads or writes Git metadata (`.git/`, index, refs).
 - `varn checkpoint` skips `.varn/` during scans, so checkpointing a
   git-managed directory does not capture Git's internals.
-- If the store is not excluded from git (legacy store), commands warn with a
-  one-line fix: `echo '.varn/' >> .gitignore`. `varn init --gitignore`
-  applies it for you; `varn migrate` backfills the store-level guard.
+- `varn checkpoint` recreates a missing `.varn/.gitignore` guard before it
+  scans, so a deleted guard cannot leave the object store exposed to
+  `git add -A`. `varn migrate` also backfills the guard.
 
 ## Global flags
 
@@ -203,6 +207,10 @@ Errors are also emitted as JSON to stderr when `--json` is active, making Varn s
   "warnings": []
 }
 ```
+
+For an unchanged checkpoint, the same fields are returned with
+`"status": "unchanged"` and `"saved": false`. This is a successful no-op,
+not an error.
 
 **`varn --json list`**
 

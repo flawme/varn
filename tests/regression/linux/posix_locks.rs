@@ -108,7 +108,7 @@ fn unreadable_file_checkpoint_then_readable_restore() {
     let snapshot = repo.checkpoint("with locked");
 
     // Make it readable again and delete both; restore must bring back
-    // ok.txt and warn about locked.txt.
+    // ok.txt. The locked file was intentionally omitted from the snapshot.
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
     fs::remove_file(&locked).unwrap();
     fs::remove_file(repo.root().join("ok.txt")).unwrap();
@@ -116,7 +116,12 @@ fn unreadable_file_checkpoint_then_readable_restore() {
     let result = repo.restore(&snapshot);
     assert_eq!(repo.read_str("ok.txt"), "ok");
     assert!(
-        result.warnings.iter().any(|w| w.contains("locked.txt")),
-        "expected a warning for the hashless file"
+        !repo.root().join("locked.txt").exists(),
+        "an unreadable file must not be represented as restorable content"
+    );
+    assert!(
+        result.warnings.is_empty(),
+        "unexpected restore warnings: {:?}",
+        result.warnings
     );
 }
